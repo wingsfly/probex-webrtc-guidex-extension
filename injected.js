@@ -48,25 +48,32 @@
   const origProtoGUM = MediaDevices.prototype.getUserMedia;
 
   async function hookedGetUserMedia(constraints) {
-    const realStream = await origProtoGUM.call(this, constraints);
-    if (!constraints?.audio) return realStream;
+    if (!constraints?.audio) {
+      return origProtoGUM.call(this, constraints);
+    }
 
     ensureAudioCtx();
     if (audioCtx.state === 'suspended') await audioCtx.resume();
 
+    // Try to get real mic stream; if no mic available, create a silent proxy anyway
+    let realStream = null;
     try {
+      realStream = await origProtoGUM.call(this, constraints);
+      // Connect real mic to our mixer
       const micSource = audioCtx.createMediaStreamSource(realStream);
       micSource.connect(micGainNode);
     } catch (e) {
-      console.warn('[ProbeX] mic source connect error:', e.message);
-      return realStream;
+      console.debug('[ProbeX] getUserMedia: no mic (' + e.name + '), using silent proxy stream');
+      // No mic — return proxy with silent audio (will be filled by test audio injection)
     }
 
     const proxy = new MediaStream();
-    realStream.getVideoTracks().forEach(t => proxy.addTrack(t));
+    // Keep video tracks from real stream if available
+    if (realStream) realStream.getVideoTracks().forEach(t => proxy.addTrack(t));
+    // Audio from our mixer (silent when no mic, test audio when playing)
     streamDest.stream.getAudioTracks().forEach(t => proxy.addTrack(t));
 
-    console.log('[ProbeX] getUserMedia intercepted: proxy stream returned');
+    console.log('[ProbeX] getUserMedia intercepted: proxy stream returned (mic=' + (realStream ? 'real' : 'none') + ')');
     return proxy;
   }
 
@@ -112,6 +119,19 @@
         }
       });
     }
+
+    // Monitor interact WS for TTS/avatar response events
+    if (url.includes('/v1/interact')) {
+      console.log('[ProbeX] interact WebSocket detected!');
+      let interactMsgCount = 0;
+      ws.addEventListener('message', (ev) => {
+        interactMsgCount++;
+        if (typeof ev.data === 'string' && interactMsgCount <= 20) {
+          console.log('[ProbeX][INTERACT] recv #' + interactMsgCount + ': ' + ev.data.slice(0, 400));
+        }
+      });
+    }
+
     return ws;
   };
   window.WebSocket.prototype = OrigWebSocket.prototype;
@@ -186,52 +206,121 @@
   let hookCheckInterval = setInterval(() => {
     try {
       if (MediaDevices.prototype.getUserMedia !== hookedGetUserMedia) {
-        console.warn('[ProbeX] getUserMedia prototype hook overwritten! Re-applying...');
         MediaDevices.prototype.getUserMedia = hookedGetUserMedia;
       }
       if (navigator.mediaDevices &&
           Object.prototype.hasOwnProperty.call(navigator.mediaDevices, 'getUserMedia') &&
           navigator.mediaDevices.getUserMedia !== hookedGetUserMedia) {
-        console.warn('[ProbeX] getUserMedia instance-level override detected! Re-applying...');
         navigator.mediaDevices.getUserMedia = hookedGetUserMedia;
       }
       // Also protect WebSocket.prototype.send hook
       if (WebSocket.prototype.send !== hookedWsSend) {
-        console.warn('[ProbeX] WebSocket.prototype.send hook overwritten! Re-applying...');
         WebSocket.prototype.send = hookedWsSend;
       }
     } catch (e) {}
-  }, 200);
-  setTimeout(() => clearInterval(hookCheckInterval), 30000);
+  }, 1000); // Check every second, indefinitely (very lightweight)
 
-  /** Play test audio into the hooked stream. Returns promise resolving when playback ends. */
+  /** Send test audio directly through the voiceDictation WebSocket.
+   *  Bypasses getUserMedia/MediaRecorder entirely — sends PCM chunks in the
+   *  same format the Guidex SDK uses: {"status":1,"message":"<base64 PCM>"} */
   function playTestAudio() {
-    return new Promise(async (resolve) => {
+    return new Promise((resolve) => {
       if (!audioBuffer) { console.warn('[ProbeX] No audio buffer loaded'); resolve(); return; }
-
-      ensureAudioCtx();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-      // Mute real mic, enable injection path
-      micGainNode.gain.value = 0;
-      injectGainNode.gain.value = 1;
-
-      if (currentSource) { try { currentSource.stop(); } catch (e) {} }
-
-      currentSource = audioCtx.createBufferSource();
-      currentSource.buffer = audioBuffer;
-      currentSource.connect(injectGainNode);
-      currentSource.onended = () => {
-        // Restore: mic on, injection off
-        micGainNode.gain.value = 1;
-        injectGainNode.gain.value = 0;
-        currentSource = null;
-        console.log('[ProbeX] Test audio ended, mic restored');
+      if (!voiceDictationWs || voiceDictationWs.readyState !== WebSocket.OPEN) {
+        console.warn('[ProbeX] voiceDictation WebSocket not open');
         resolve();
+        return;
+      }
+
+      // Convert AudioBuffer to 16-bit PCM at 16kHz (iFlytek ASR standard)
+      const targetRate = 16000;
+      const srcData = audioBuffer.getChannelData(0); // mono channel
+      const ratio = audioBuffer.sampleRate / targetRate;
+      const targetLen = Math.floor(srcData.length / ratio);
+      const pcm16 = new Int16Array(targetLen);
+      for (let i = 0; i < targetLen; i++) {
+        const srcIdx = Math.floor(i * ratio);
+        const sample = Math.max(-1, Math.min(1, srcData[srcIdx]));
+        pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      }
+
+      // Split into chunks (~40ms each, matching typical ASR frame size)
+      const chunkSamples = Math.floor(targetRate * 0.04); // 640 samples per 40ms
+      const totalChunks = Math.ceil(pcm16.length / chunkSamples);
+      const sendInterval = 40;
+
+      console.log('[ProbeX] Sending test audio via WS: ' + audioBuffer.duration.toFixed(1) + 's, ' + totalChunks + ' chunks @ ' + sendInterval + 'ms');
+
+      const ws = voiceDictationWs;
+      const origSendRef = OrigWebSocket.prototype.send.bind(ws);
+
+      // Pre-encode all chunks to base64 strings
+      const encodedChunks = [];
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSamples;
+        const end = Math.min(start + chunkSamples, pcm16.length);
+        const chunk = pcm16.slice(start, end);
+        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        let binary = '';
+        for (let j = 0; j < bytes.length; j++) binary += String.fromCharCode(bytes[j]);
+        encodedChunks.push(btoa(binary));
+      }
+
+      // Use a Web Worker for accurate timing even when tab is hidden.
+      // Worker timers are NOT throttled by Chrome's background tab policy.
+      const workerCode = `
+        let idx = 0, total = 0, interval = 40;
+        self.onmessage = (e) => {
+          total = e.data.total;
+          interval = e.data.interval;
+          tick();
+        };
+        function tick() {
+          if (idx >= total) { self.postMessage({ done: true, sent: idx }); return; }
+          self.postMessage({ idx: idx });
+          idx++;
+          setTimeout(tick, interval);
+        }
+      `;
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const worker = new Worker(URL.createObjectURL(blob));
+
+      worker.onmessage = (e) => {
+        if (e.data.done) {
+          worker.terminate();
+          URL.revokeObjectURL(blob);
+          console.log('[ProbeX] Test audio send complete (' + e.data.sent + '/' + totalChunks + ' chunks)');
+          resolve();
+          return;
+        }
+        const idx = e.data.idx;
+        if (ws.readyState !== WebSocket.OPEN) {
+          worker.terminate();
+          console.warn('[ProbeX] WS closed during send at chunk ' + idx);
+          resolve();
+          return;
+        }
+        try {
+          origSendRef(JSON.stringify({ status: 1, message: encodedChunks[idx] }));
+        } catch (err) {
+          console.error('[ProbeX] WS send error:', err.message);
+          worker.terminate();
+          resolve();
+        }
       };
-      currentSource.start();
-      console.log('[ProbeX] Playing test audio (' + audioBuffer.duration.toFixed(1) + 's) via getUserMedia proxy');
+
+      worker.postMessage({ total: totalChunks, interval: sendInterval });
     });
+  }
+
+  /** Send voiceDictation end message (status=2) to close the ASR session */
+  function sendVoiceDictationEnd() {
+    if (!voiceDictationWs || voiceDictationWs.readyState !== WebSocket.OPEN) return;
+    try {
+      const msg = JSON.stringify({ status: 2, message: '', language: 'en' });
+      OrigWebSocket.prototype.send.call(voiceDictationWs, msg);
+      console.log('[ProbeX] Sent voiceDictation end (status=2)');
+    } catch (e) {}
   }
 
   // --- Config (injected via postMessage from content-script) ---
@@ -408,7 +497,8 @@
   async function probexFetch(url, options) {
     // Try proxy through content-script → background (bypasses mixed content)
     const proxyResult = await proxyFetch(url, options);
-    if (proxyResult) {
+    // Only trust proxy if it got a real HTTP response (status > 0)
+    if (proxyResult && proxyResult.status > 0) {
       return { ok: proxyResult.ok, status: proxyResult.status };
     }
     // Fallback: direct fetch (works for localhost, same-protocol, etc.)
@@ -439,6 +529,9 @@
               { name: 'video_fps', type: 'number', unit: 'fps', chartable: true },
               { name: 'quality_limitation', type: 'string', description: 'cpu/bandwidth/none' },
               { name: 'available_outgoing_bitrate', type: 'number', unit: 'bps', chartable: true },
+              { name: 'audio_jb_delay_ms', type: 'number', unit: 'ms', description: 'Audio jitter buffer playout delay', chartable: true },
+              { name: 'video_jb_delay_ms', type: 'number', unit: 'ms', description: 'Video jitter buffer playout delay', chartable: true },
+              { name: 'av_sync_diff_ms', type: 'number', unit: 'ms', description: 'Video-Audio jitter buffer delay diff (>0 = video lags)', chartable: true },
               { name: 'page_url', type: 'string', description: 'Source page URL' },
               { name: 'connection_count', type: 'number', description: 'Active PeerConnection count' },
             ],
@@ -449,10 +542,25 @@
     } catch (e) { registered = false; }
   }
 
+  let regFailCount = 0;
   async function pushResults() {
     if (!enabled || resultBuffer.length === 0) return;
-    console.log('[ProbeX] push: buffer=%d conns=%d', resultBuffer.length, connections.size);
-    if (!registered) { await registerProbe(); if (!registered) { console.warn('[ProbeX] registration failed'); return; } }
+    if (!registered) {
+      regFailCount++;
+      // Exponential backoff: only retry registration every 2^n cycles (max 64 = ~5 min)
+      const retryEvery = Math.min(64, Math.pow(2, Math.floor(Math.log2(regFailCount))));
+      if (regFailCount % retryEvery !== 0) return;
+      await registerProbe();
+      if (!registered) {
+        if (regFailCount <= 1) {
+          console.debug('[ProbeX] ProbeX hub unreachable (' + hubUrl + '), will retry with backoff');
+        }
+        // Don't let buffer grow unbounded when server is unreachable
+        if (resultBuffer.length > 50) resultBuffer = resultBuffer.slice(-20);
+        return;
+      }
+      regFailCount = 0;
+    }
 
     const batch = resultBuffer.splice(0);
     const probeResults = mergeBatch(batch);
@@ -511,6 +619,13 @@
         }
         if (!result.extra.available_outgoing_bitrate && r.availableOutgoingBitrate != null)
           result.extra.available_outgoing_bitrate = r.availableOutgoingBitrate;
+        // Jitter buffer delay (first-wins)
+        if (result.extra.audio_jb_delay_ms == null && r.audioJbDelayMs != null)
+          result.extra.audio_jb_delay_ms = Math.round(r.audioJbDelayMs * 100) / 100;
+        if (result.extra.video_jb_delay_ms == null && r.videoJbDelayMs != null)
+          result.extra.video_jb_delay_ms = Math.round(r.videoJbDelayMs * 100) / 100;
+        if (result.extra.av_sync_diff_ms == null && r.avSyncDiffMs != null)
+          result.extra.av_sync_diff_ms = r.avSyncDiffMs;
         if (r.packetLossPct != null && r.packetLossPct > worstLoss) worstLoss = r.packetLossPct;
         if (r.downloadBps != null) { totalDown += r.downloadBps; hasDown = true; }
         if (r.uploadBps != null) { totalUp += r.uploadBps; hasUp = true; }
@@ -570,6 +685,46 @@
     for (const r of inboundAudio) { if (r.jitter != null) { now.audioJitter = r.jitter * 1000; break; } }
     // Video jitter
     for (const r of inboundVideo) { if (r.jitter != null) { now.videoJitter = r.jitter * 1000; break; } }
+
+    // Jitter buffer delay (for audio/video sync analysis)
+    // Use INCREMENTAL calculation for instantaneous delay (not cumulative average)
+    let audioJbDelay = null, videoJbDelay = null;
+    for (const r of inboundAudio) {
+      if (r.jitterBufferDelay != null && r.jitterBufferEmittedCount > 0) {
+        if (prevMap) {
+          const prev = prevMap.get(r.id);
+          if (prev && prev.jitterBufferEmittedCount != null) {
+            const dDelay = r.jitterBufferDelay - (prev.jitterBufferDelay || 0);
+            const dCount = r.jitterBufferEmittedCount - (prev.jitterBufferEmittedCount || 0);
+            if (dCount > 0) audioJbDelay = (dDelay / dCount) * 1000; // ms, instantaneous
+          }
+        }
+        if (audioJbDelay == null) {
+          audioJbDelay = (r.jitterBufferDelay / r.jitterBufferEmittedCount) * 1000; // fallback: cumulative
+        }
+        break;
+      }
+    }
+    for (const r of inboundVideo) {
+      if (r.jitterBufferDelay != null && r.jitterBufferEmittedCount > 0) {
+        if (prevMap) {
+          const prev = prevMap.get(r.id);
+          if (prev && prev.jitterBufferEmittedCount != null) {
+            const dDelay = r.jitterBufferDelay - (prev.jitterBufferDelay || 0);
+            const dCount = r.jitterBufferEmittedCount - (prev.jitterBufferEmittedCount || 0);
+            if (dCount > 0) videoJbDelay = (dDelay / dCount) * 1000;
+          }
+        }
+        if (videoJbDelay == null) {
+          videoJbDelay = (r.jitterBufferDelay / r.jitterBufferEmittedCount) * 1000;
+        }
+        break;
+      }
+    }
+    now.audioJbDelayMs = audioJbDelay != null ? Math.round(audioJbDelay * 100) / 100 : null;
+    now.videoJbDelayMs = videoJbDelay != null ? Math.round(videoJbDelay * 100) / 100 : null;
+    // Instantaneous A/V sync: positive = video delayed more (mouth lags behind voice)
+    now.avSyncDiffMs = (audioJbDelay != null && videoJbDelay != null) ? Math.round((videoJbDelay - audioJbDelay) * 100) / 100 : null;
 
     // Packet loss
     let totalLostDelta = 0, totalRecvDelta = 0;
@@ -786,6 +941,79 @@
     document.addEventListener('keydown', onKeydown, true);
   };
 
+  // ====== Guidex Interaction Probe: Timing Metrics ======
+
+  let interactionProbeRegistered = false;
+  const INTERACTION_PROBE_NAME = 'guidex-interaction';
+
+  async function registerInteractionProbe() {
+    try {
+      const result = await probexFetch(`${hubUrl}/api/v1/probes/register`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: INTERACTION_PROBE_NAME,
+          description: 'Guidex auto-test: end-to-end voice interaction timing metrics',
+          output_schema: {
+            standard_fields: ['latency_ms'],
+            extra_fields: [
+              { name: 'success', type: 'boolean', description: 'Whether ASR recognized speech', chartable: false },
+              { name: 'asr_text', type: 'string', description: 'Recognized text from ASR' },
+              { name: 'audio_duration_ms', type: 'number', unit: 'ms', description: 'Duration of injected test audio', chartable: true },
+              { name: 'click_to_vd_ready_ms', type: 'number', unit: 'ms', description: 'Button click → voiceDictation WS init', chartable: true },
+              { name: 'audio_start_to_first_asr_ms', type: 'number', unit: 'ms', description: 'Audio send start → first word recognized', chartable: true },
+              { name: 'audio_end_to_final_asr_ms', type: 'number', unit: 'ms', description: 'Audio send end → final ASR result', chartable: true },
+              { name: 'audio_end_to_tts_ms', type: 'number', unit: 'ms', description: 'User done speaking → first TTS synthesis event', chartable: true },
+              { name: 'tts_to_avatar_speak_ms', type: 'number', unit: 'ms', description: 'TTS synthesis → avatar starts speaking', chartable: true },
+              { name: 'avatar_speak_duration_ms', type: 'number', unit: 'ms', description: 'Avatar speaking duration (all segments)', chartable: true },
+              { name: 'tts_total_duration_ms', type: 'number', unit: 'ms', description: 'Total TTS audio duration (sum of segments)', chartable: true },
+              { name: 'lip_move_ms', type: 'number', unit: 'ms', description: 'Total mouth-moving time (sum of vmr_status 1→2)', chartable: true },
+              { name: 'lip_sync_diff_ms', type: 'number', unit: 'ms', description: 'TTS audio duration minus lip-move time (>0 = mouth moves less than audio)', chartable: true },
+              { name: 'actual_audio_start_ms', type: 'number', unit: 'ms', description: 'Client actually hears audio (from click)', chartable: true },
+              { name: 'actual_audio_end_ms', type: 'number', unit: 'ms', description: 'Client audio goes silent (from click)', chartable: true },
+              { name: 'actual_audio_duration_ms', type: 'number', unit: 'ms', description: 'Actual client-side audio playback duration', chartable: true },
+              { name: 'vmr_to_actual_audio_ms', type: 'number', unit: 'ms', description: 'vmr_status=1 → client hears audio (server-client delay)', chartable: true },
+              { name: 'total_interaction_ms', type: 'number', unit: 'ms', description: 'Button click → avatar finishes speaking', chartable: true },
+              { name: 'cycle', type: 'number', description: 'Auto-test cycle number' },
+              { name: 'page_url', type: 'string', description: 'Source page URL' },
+            ],
+          },
+        }),
+      });
+      interactionProbeRegistered = result.ok || result.status === 409;
+    } catch (e) { interactionProbeRegistered = false; }
+  }
+
+  async function pushInteractionResult(metrics) {
+    if (!interactionProbeRegistered) {
+      await registerInteractionProbe();
+      if (!interactionProbeRegistered) return;
+    }
+    try {
+      await probexFetch(`${hubUrl}/api/v1/probes/${encodeURIComponent(INTERACTION_PROBE_NAME)}/push`, {
+        method: 'POST',
+        body: JSON.stringify({
+          task_id: 'ext_' + INTERACTION_PROBE_NAME,
+          agent_id: agentId,
+          results: [{
+            timestamp: new Date().toISOString(),
+            success: metrics.success,
+            latency_ms: metrics.totalInteractionMs || null,
+            extra: metrics,
+          }],
+        }),
+      });
+      console.log('[ProbeX] Interaction probe: ' + (metrics.success ? 'OK' : 'FAIL') +
+        ' total=' + (metrics.total_interaction_ms || '-') + 'ms' +
+        ' firstASR=' + (metrics.audio_start_to_first_asr_ms || '-') + 'ms' +
+        ' speakToTts=' + (metrics.audio_end_to_tts_ms || '-') + 'ms' +
+        ' avatarSpeak=' + (metrics.avatar_speak_duration_ms || '-') + 'ms' +
+        ' lipMove=' + (metrics.lip_move_ms || '-') + 'ms' +
+        ' actualAudio=' + (metrics.actual_audio_duration_ms || '-') + 'ms' +
+        ' ttsDur=' + (metrics.tts_total_duration_ms || '-') + 'ms' +
+        ' vmrToAudio=' + (metrics.vmr_to_actual_audio_ms != null ? metrics.vmr_to_actual_audio_ms : '-') + 'ms');
+    } catch (e) {}
+  }
+
   // ====== Auto-Test: Loop ======
 
   let autoTestTimer = null;
@@ -798,29 +1026,275 @@
     if (!autoTestRunning) return;
 
     const btn = document.querySelector(autoTestSelector);
-    if (!btn) {
-      console.warn('[ProbeX] Auto-test: button not found with selector:', autoTestSelector);
-      return;
-    }
+    if (!btn) return; // silently skip on wrong page
     if (!audioBuffer) {
       console.warn('[ProbeX] Auto-test: no audio loaded');
       return;
     }
 
     autoTestCycleCount++;
-    console.log('[ProbeX] Auto-test cycle #' + autoTestCycleCount + ': clicking button');
+    const cycleNum = autoTestCycleCount;
+
+    // ---- Timing: t_click ----
+    const tClick = performance.now();
+
+    // Reset voiceDictation tracking for this cycle
+    vdSendCount = 0;
+    const prevVdWs = voiceDictationWs;
+
+    // ASR tracking state for this cycle
+    let firstAsrText = null;
+    let firstAsrTime = 0;
+    let finalAsrText = '';
+    let finalAsrTime = 0;
+    let ttsStartTime = 0;       // first tts_duration event after ASR
+    let avatarSpeakStart = 0;   // first vmr_status=1 (avatar mouth starts moving)
+    let avatarSpeakEnd = 0;     // last vmr_status=2 (avatar finished all segments)
+    let ttsTotalDuration = 0;   // sum of all tts_duration values in this cycle
+    let lipMoveMs = 0;          // total time mouth is moving (sum of vmr_status 1→2 segments)
+    let lastLipStart = 0;       // timestamp of most recent vmr_status=1
+    let ttsSegmentCount = 0;    // number of tts_duration events received
+    let lipSegmentCount = 0;    // number of vmr_status=2 events (completed lip segments)
+    let actualAudioStart = 0;   // client-side: first moment audio energy detected
+    let actualAudioEnd = 0;     // client-side: last moment audio energy dropped to silence
+    let audioEnergyMonitor = null; // cleanup handle for energy detection
+    let asrListener = null;
+    let interactListener = null;
+
+    // ---- Client-side audio playback detection via AnalyserNode ----
+    // Taps into the WebRTC audio receiver track to detect when sound actually plays.
+    function setupAudioEnergyDetector() {
+      // Find the audio receiver track from active PeerConnections
+      let audioTrack = null;
+      for (const [, entry] of connections) {
+        const pc = entry.pc;
+        if (!pc.getReceivers) continue;
+        for (const recv of pc.getReceivers()) {
+          if (recv.track?.kind === 'audio' && recv.track.readyState === 'live') {
+            audioTrack = recv.track;
+            break;
+          }
+        }
+        if (audioTrack) break;
+      }
+      if (!audioTrack) { console.debug('[ProbeX] No live audio receiver track for energy detection'); return; }
+
+      try {
+        const detectCtx = new AudioContext();
+        const source = detectCtx.createMediaStreamSource(new MediaStream([audioTrack]));
+        const analyser = detectCtx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.3;
+        source.connect(analyser);
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const SILENCE_THRESHOLD = 10; // RMS energy threshold (0-255 scale)
+        let wasPlaying = false;
+
+        const pollInterval = setInterval(() => {
+          analyser.getByteFrequencyData(dataArray);
+          // Calculate RMS energy
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+          const rms = Math.sqrt(sum / dataArray.length);
+
+          const isPlaying = rms > SILENCE_THRESHOLD;
+          if (isPlaying && !wasPlaying) {
+            // Silence → Sound transition
+            if (!actualAudioStart && finalAsrTime) { // only after ASR (ignore pre-existing audio)
+              actualAudioStart = performance.now();
+            }
+            wasPlaying = true;
+          } else if (!isPlaying && wasPlaying) {
+            // Sound → Silence transition
+            actualAudioEnd = performance.now();
+            wasPlaying = false;
+          }
+        }, 50); // 50ms polling = 20Hz, very lightweight
+
+        audioEnergyMonitor = () => {
+          clearInterval(pollInterval);
+          source.disconnect();
+          detectCtx.close().catch(() => {});
+        };
+      } catch (e) {
+        console.debug('[ProbeX] Audio energy detector setup failed:', e.message);
+      }
+    }
+
+    // Listen for ASR responses on the voiceDictation WS
+    function setupAsrListener(ws) {
+      asrListener = (ev) => {
+        if (typeof ev.data !== 'string') return;
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.code !== 0 || !msg.data?.result) return;
+          const result = msg.data.result;
+          // Extract recognized words
+          const words = (result.ws || []).flatMap(w => (w.cw || []).map(c => c.w)).join('').trim();
+
+          if (words && !firstAsrTime) {
+            firstAsrTime = performance.now();
+            firstAsrText = words;
+          }
+          if (result.ls === true && msg.data.status === 2) {
+            finalAsrTime = performance.now();
+            finalAsrText = words || firstAsrText || '';
+          }
+        } catch (e) {}
+      };
+      ws.addEventListener('message', asrListener);
+    }
+
+    // Listen for TTS/avatar response on the interact WS
+    // iFlytek interact protocol: event_type "tts_duration" signals TTS start,
+    // event_type "driver_status" with vmr_status=1 signals avatar starts speaking
+    function setupTtsListener() {
+      const interactWs = window.__probexWsList.find(ws =>
+        ws.url?.includes('/v1/interact') && ws.readyState === WebSocket.OPEN
+      );
+      if (!interactWs) return;
+      interactListener = (ev) => {
+        if (typeof ev.data !== 'string') return;
+        try {
+          const msg = JSON.parse(ev.data);
+          const avatar = msg.payload?.avatar;
+          if (!avatar || !finalAsrTime) return; // only track events after ASR ends
+
+          if (avatar.event_type === 'tts_duration') {
+            if (!ttsStartTime) ttsStartTime = performance.now();
+            ttsTotalDuration += (avatar.tts_duration || 0);
+            ttsSegmentCount++;
+          }
+          if (avatar.event_type === 'driver_status') {
+            if (avatar.vmr_status === 1) {
+              if (!avatarSpeakStart) avatarSpeakStart = performance.now();
+              // Only set lastLipStart on the FIRST vmr=1 of each segment.
+              // vmr=1 can fire multiple times within a segment (progress updates).
+              if (!lastLipStart) lastLipStart = performance.now();
+            }
+            if (avatar.vmr_status === 2) {
+              avatarSpeakEnd = performance.now();
+              lipSegmentCount++;
+              if (lastLipStart) { lipMoveMs += (avatarSpeakEnd - lastLipStart); lastLipStart = 0; }
+            }
+          }
+        } catch (e) {}
+      };
+      interactWs.addEventListener('message', interactListener);
+    }
+
+    console.log('[ProbeX] Auto-test cycle #' + cycleNum + ': clicking button');
 
     // Click to start conversation
     btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 
-    // Short delay for the app to start capturing audio
-    await new Promise(r => setTimeout(r, 500));
+    // Wait for voiceDictation WS ready
+    const vdReady = await new Promise((resolve) => {
+      let checks = 0;
+      const check = setInterval(() => {
+        checks++;
+        if (voiceDictationWs && voiceDictationWs !== prevVdWs && vdSendCount >= 1) {
+          clearInterval(check);
+          resolve(true);
+        }
+        if (checks > 50) { clearInterval(check); resolve(false); }
+      }, 100);
+    });
 
-    // Play audio into the hooked MediaStream
+    // ---- Timing: t_vd_ready ----
+    const tVdReady = performance.now();
+
+    if (!vdReady) {
+      console.warn('[ProbeX] Auto-test cycle #' + cycleNum + ': VD not ready, skipping');
+      await pushInteractionResult({
+        success: false, cycle: cycleNum, page_url: location.href,
+        audio_duration_ms: Math.round(audioBuffer.duration * 1000),
+        click_to_vd_ready_ms: null,
+      });
+      return;
+    }
+
+    // Setup listeners before sending audio
+    setupAsrListener(voiceDictationWs);
+    setupTtsListener();
+    setupAudioEnergyDetector();
+
+    await new Promise(r => setTimeout(r, 800));
+
+    // ---- Timing: t_audio_start ----
+    const tAudioStart = performance.now();
+    console.log('[ProbeX] Auto-test cycle #' + cycleNum + ': VD ready, playing audio');
+
     await playTestAudio();
 
-    // Extra silence delay for VAD to detect end-of-speech
-    console.log('[ProbeX] Auto-test cycle #' + autoTestCycleCount + ': audio done, waiting for VAD');
+    // ---- Timing: t_audio_end ----
+    const tAudioEnd = performance.now();
+
+    await new Promise(r => setTimeout(r, 300));
+    sendVoiceDictationEnd();
+
+    // Wait for avatar to finish ALL TTS segments or timeout.
+    // Done condition: lipSegmentCount >= ttsSegmentCount (each TTS segment has a matching vmr_status:2)
+    await new Promise((resolve) => {
+      let checks = 0;
+      const check = setInterval(() => {
+        checks++;
+        const elapsed = checks * 100;
+        // Phase 1: no ASR after 15s → give up
+        if (!finalAsrTime && elapsed > 15000) { clearInterval(check); resolve(); return; }
+        // Phase 2: ASR done but no TTS after 10s → give up on TTS
+        if (finalAsrTime && !ttsStartTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
+        // Phase 3: all TTS segments have completed (vmr_status:2 count matches tts_duration count)
+        if (ttsSegmentCount > 0 && lipSegmentCount >= ttsSegmentCount) {
+          clearInterval(check); resolve(); return;
+        }
+        // Hard timeout: 60 seconds total (long TTS can be 10-15s per segment)
+        if (elapsed > 60000) { clearInterval(check); resolve(); return; }
+      }, 100);
+    });
+
+    // ---- Collect metrics ----
+    const asrSuccess = !!firstAsrText;
+    const metrics = {
+      success: asrSuccess,
+      asr_text: finalAsrText || firstAsrText || '',
+      cycle: cycleNum,
+      page_url: location.href,
+      audio_duration_ms: Math.round(audioBuffer.duration * 1000),
+      click_to_vd_ready_ms: Math.round(tVdReady - tClick),
+      audio_start_to_first_asr_ms: firstAsrTime ? Math.round(firstAsrTime - tAudioStart) : null,
+      audio_end_to_final_asr_ms: finalAsrTime ? Math.round(finalAsrTime - tAudioEnd) : null,
+      audio_end_to_tts_ms: ttsStartTime ? Math.round(ttsStartTime - tAudioEnd) : null,
+      tts_to_avatar_speak_ms: (ttsStartTime && avatarSpeakStart) ? Math.round(avatarSpeakStart - ttsStartTime) : null,
+      avatar_speak_duration_ms: (avatarSpeakStart && avatarSpeakEnd) ? Math.round(avatarSpeakEnd - avatarSpeakStart) : null,
+      tts_total_duration_ms: ttsTotalDuration || null,
+      lip_move_ms: lipMoveMs ? Math.round(lipMoveMs) : null,
+      lip_sync_diff_ms: (ttsTotalDuration && lipMoveMs) ? Math.round(ttsTotalDuration - lipMoveMs) : null,
+      actual_audio_start_ms: actualAudioStart ? Math.round(actualAudioStart - tClick) : null,
+      actual_audio_end_ms: actualAudioEnd ? Math.round(actualAudioEnd - tClick) : null,
+      actual_audio_duration_ms: (actualAudioStart && actualAudioEnd) ? Math.round(actualAudioEnd - actualAudioStart) : null,
+      vmr_to_actual_audio_ms: (avatarSpeakStart && actualAudioStart) ? Math.round(actualAudioStart - avatarSpeakStart) : null,
+      total_interaction_ms: actualAudioEnd ? Math.round(actualAudioEnd - tClick)
+        : avatarSpeakEnd ? Math.round(avatarSpeakEnd - tClick)
+        : ttsStartTime ? Math.round(ttsStartTime - tClick)
+        : finalAsrTime ? Math.round(finalAsrTime - tClick)
+        : null,
+    };
+
+    // Cleanup listeners and audio detector
+    if (asrListener && voiceDictationWs) voiceDictationWs.removeEventListener('message', asrListener);
+    if (interactListener) {
+      const iws = window.__probexWsList.find(ws => ws.url?.includes('/v1/interact'));
+      if (iws) iws.removeEventListener('message', interactListener);
+    }
+    if (audioEnergyMonitor) audioEnergyMonitor();
+
+    // Push to ProbeX
+    await pushInteractionResult(metrics);
+
+    console.log('[ProbeX] Auto-test cycle #' + cycleNum + ': complete (' +
+      (asrSuccess ? 'ASR="' + finalAsrText + '"' : 'no ASR') +
+      ' total=' + (metrics.total_interaction_ms || '?') + 'ms)');
   }
 
   async function startAutoTest(selector, interval) {
@@ -834,19 +1308,21 @@
 
     console.log('[ProbeX] Auto-test started: selector=' + selector + ' interval=' + (autoTestInterval / 1000) + 's hasAudio=' + !!audioBuffer);
 
-    // Run first cycle immediately
-    autoTestCycle();
-
-    // Schedule subsequent cycles
-    if (autoTestTimer) clearInterval(autoTestTimer);
-    autoTestTimer = setInterval(autoTestCycle, autoTestInterval);
+    // Run cycles sequentially: wait for each cycle to complete, then wait interval
+    (async function loop() {
+      while (autoTestRunning) {
+        await autoTestCycle();
+        if (!autoTestRunning) break;
+        // Wait interval AFTER cycle completes (not overlapping)
+        await new Promise(r => { autoTestTimer = setTimeout(r, autoTestInterval); });
+      }
+    })();
   }
 
   function stopAutoTest() {
     autoTestRunning = false;
-    if (autoTestTimer) { clearInterval(autoTestTimer); autoTestTimer = null; }
+    if (autoTestTimer) { clearTimeout(autoTestTimer); autoTestTimer = null; }
     if (currentSource) { try { currentSource.stop(); } catch (e) {} }
-    // Restore mic
     if (micGainNode) micGainNode.gain.value = 1;
     if (injectGainNode) injectGainNode.gain.value = 0;
     console.log('[ProbeX] Auto-test stopped after ' + autoTestCycleCount + ' cycles');
