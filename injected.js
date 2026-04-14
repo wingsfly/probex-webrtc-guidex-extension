@@ -462,24 +462,19 @@
     const last = subSamples[subSamples.length - 1];
     const aggregated = { ...last };
 
-    // For jitter buffer and sync metrics, take the max absolute value (worst case)
-    let maxAvSync = null;
-    let maxAudioJb = null;
-    let maxVideoJb = null;
+    // JB delay: audio and video come from different PCs (separate sub-samples).
+    // Collect the latest non-null value for each, then compute cross-PC sync diff.
+    let latestAudioJb = null;
+    let latestVideoJb = null;
     for (const s of subSamples) {
-      if (s.avSyncDiffMs != null) {
-        if (maxAvSync == null || Math.abs(s.avSyncDiffMs) > Math.abs(maxAvSync)) maxAvSync = s.avSyncDiffMs;
-      }
-      if (s.audioJbDelayMs != null) {
-        if (maxAudioJb == null || s.audioJbDelayMs > maxAudioJb) maxAudioJb = s.audioJbDelayMs;
-      }
-      if (s.videoJbDelayMs != null) {
-        if (maxVideoJb == null || s.videoJbDelayMs > maxVideoJb) maxVideoJb = s.videoJbDelayMs;
-      }
+      if (s.audioJbDelayMs != null) latestAudioJb = s.audioJbDelayMs;
+      if (s.videoJbDelayMs != null) latestVideoJb = s.videoJbDelayMs;
     }
-    if (maxAvSync != null) aggregated.avSyncDiffMs = maxAvSync;
-    if (maxAudioJb != null) aggregated.audioJbDelayMs = maxAudioJb;
-    if (maxVideoJb != null) aggregated.videoJbDelayMs = maxVideoJb;
+    if (latestAudioJb != null) aggregated.audioJbDelayMs = latestAudioJb;
+    if (latestVideoJb != null) aggregated.videoJbDelayMs = latestVideoJb;
+    // Compute sync diff across PCs (positive = video lags behind audio)
+    aggregated.avSyncDiffMs = (latestAudioJb != null && latestVideoJb != null)
+      ? Math.round((latestVideoJb - latestAudioJb) * 100) / 100 : null;
 
     resultBuffer.push({
       timestamp: new Date().toISOString(),
@@ -1214,10 +1209,12 @@
             ttsSegmentCount++;
           }
           if (avatar.event_type === 'driver_status') {
-            if (avatar.vmr_status === 1) {
+            // vmr_status=0: driver starts processing (always present)
+            // vmr_status=1: avatar mouth starts moving (may be absent for short segments)
+            // vmr_status=2: segment complete
+            if (avatar.vmr_status === 0 || avatar.vmr_status === 1) {
               if (!avatarSpeakStart) avatarSpeakStart = performance.now();
-              // Only set lastLipStart on the FIRST vmr=1 of each segment.
-              // vmr=1 can fire multiple times within a segment (progress updates).
+              // Use first vmr=0 or vmr=1 of each segment as lip start
               if (!lastLipStart) lastLipStart = performance.now();
             }
             if (avatar.vmr_status === 2) {
@@ -1282,21 +1279,26 @@
     sendVoiceDictationEnd();
 
     // Wait for avatar to finish ALL TTS segments or timeout.
-    // Done condition: lipSegmentCount >= ttsSegmentCount (each TTS segment has a matching vmr_status:2)
+    // Done: wait for all TTS segments to have matching vmr_status:2, then wait 3s quiet
+    // to catch any late-arriving additional segments.
     await new Promise((resolve) => {
       let checks = 0;
+      let allMatchedAt = 0; // timestamp when lip count first matched tts count
       const check = setInterval(() => {
         checks++;
         const elapsed = checks * 100;
-        // Phase 1: no ASR after 15s → give up
         if (!finalAsrTime && elapsed > 15000) { clearInterval(check); resolve(); return; }
-        // Phase 2: ASR done but no TTS after 10s → give up on TTS
         if (finalAsrTime && !ttsStartTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
-        // Phase 3: all TTS segments have completed (vmr_status:2 count matches tts_duration count)
+        // Check if all known segments completed
         if (ttsSegmentCount > 0 && lipSegmentCount >= ttsSegmentCount) {
-          clearInterval(check); resolve(); return;
+          if (!allMatchedAt) allMatchedAt = performance.now();
+          // Wait 3s after match to catch late additional segments
+          if (performance.now() - allMatchedAt > 3000) {
+            clearInterval(check); resolve(); return;
+          }
+        } else {
+          allMatchedAt = 0; // reset if new segment arrived
         }
-        // Hard timeout: 60 seconds total (long TTS can be 10-15s per segment)
         if (elapsed > 60000) { clearInterval(check); resolve(); return; }
       }, 100);
     });
