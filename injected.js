@@ -428,9 +428,13 @@
   window.RTCPeerConnection = ProxiedRTCPeerConnection;
   if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = ProxiedRTCPeerConnection;
 
-  // ====== Stats Collection ======
+  // ====== Stats Collection (500ms sub-sampling → 2s max-aggregated push) ======
 
-  async function collectAllStats() {
+  const SUBSAMPLE_INTERVAL = 500;  // collect getStats every 500ms
+  const REPORT_INTERVAL = 2000;    // aggregate and report every 2s
+  let subSamples = [];             // accumulate sub-samples within the 2s window
+
+  async function collectSubSample() {
     if (stopped || !enabled) return;
 
     for (const [id, entry] of connections) {
@@ -444,18 +448,47 @@
         const metrics = extractMetrics(stats, prevStats);
         if (metrics) {
           latestMetrics = metrics;
-          resultBuffer.push({
-            timestamp: new Date().toISOString(),
-            pageUrl: location.href,
-            connectionCount: connections.size,
-            metrics,
-          });
+          subSamples.push(metrics);
         }
         entry.prevStats = statsToMap(stats);
-      } catch (e) { /* PC may have been closed */ }
+      } catch (e) {}
     }
+  }
 
-    // Bound buffer
+  function flushSubSamples() {
+    if (subSamples.length === 0) return;
+
+    // Aggregate: take max of sync metrics, last value of others
+    const last = subSamples[subSamples.length - 1];
+    const aggregated = { ...last };
+
+    // For jitter buffer and sync metrics, take the max absolute value (worst case)
+    let maxAvSync = null;
+    let maxAudioJb = null;
+    let maxVideoJb = null;
+    for (const s of subSamples) {
+      if (s.avSyncDiffMs != null) {
+        if (maxAvSync == null || Math.abs(s.avSyncDiffMs) > Math.abs(maxAvSync)) maxAvSync = s.avSyncDiffMs;
+      }
+      if (s.audioJbDelayMs != null) {
+        if (maxAudioJb == null || s.audioJbDelayMs > maxAudioJb) maxAudioJb = s.audioJbDelayMs;
+      }
+      if (s.videoJbDelayMs != null) {
+        if (maxVideoJb == null || s.videoJbDelayMs > maxVideoJb) maxVideoJb = s.videoJbDelayMs;
+      }
+    }
+    if (maxAvSync != null) aggregated.avSyncDiffMs = maxAvSync;
+    if (maxAudioJb != null) aggregated.audioJbDelayMs = maxAudioJb;
+    if (maxVideoJb != null) aggregated.videoJbDelayMs = maxVideoJb;
+
+    resultBuffer.push({
+      timestamp: new Date().toISOString(),
+      pageUrl: location.href,
+      connectionCount: connections.size,
+      metrics: aggregated,
+    });
+
+    subSamples = [];
     if (resultBuffer.length > 200) resultBuffer = resultBuffer.slice(-100);
   }
 
@@ -968,8 +1001,7 @@
               { name: 'tts_total_duration_ms', type: 'number', unit: 'ms', description: 'Total TTS audio duration (sum of segments)', chartable: true },
               { name: 'lip_move_ms', type: 'number', unit: 'ms', description: 'Total mouth-moving time (sum of vmr_status 1→2)', chartable: true },
               { name: 'lip_sync_diff_ms', type: 'number', unit: 'ms', description: 'TTS audio duration minus lip-move time (>0 = mouth moves less than audio)', chartable: true },
-              { name: 'actual_audio_start_ms', type: 'number', unit: 'ms', description: 'Client actually hears audio (from click)', chartable: true },
-              { name: 'actual_audio_end_ms', type: 'number', unit: 'ms', description: 'Client audio goes silent (from click)', chartable: true },
+              { name: 'audio_end_to_playback_ms', type: 'number', unit: 'ms', description: 'User done speaking → client hears reply audio', chartable: true },
               { name: 'actual_audio_duration_ms', type: 'number', unit: 'ms', description: 'Actual client-side audio playback duration', chartable: true },
               { name: 'vmr_to_actual_audio_ms', type: 'number', unit: 'ms', description: 'vmr_status=1 → client hears audio (server-client delay)', chartable: true },
               { name: 'total_interaction_ms', type: 'number', unit: 'ms', description: 'Button click → avatar finishes speaking', chartable: true },
@@ -1008,9 +1040,9 @@
         ' speakToTts=' + (metrics.audio_end_to_tts_ms || '-') + 'ms' +
         ' avatarSpeak=' + (metrics.avatar_speak_duration_ms || '-') + 'ms' +
         ' lipMove=' + (metrics.lip_move_ms || '-') + 'ms' +
-        ' actualAudio=' + (metrics.actual_audio_duration_ms || '-') + 'ms' +
-        ' ttsDur=' + (metrics.tts_total_duration_ms || '-') + 'ms' +
-        ' vmrToAudio=' + (metrics.vmr_to_actual_audio_ms != null ? metrics.vmr_to_actual_audio_ms : '-') + 'ms');
+        ' endToPlay=' + (metrics.audio_end_to_playback_ms || '-') + 'ms' +
+        ' playDur=' + (metrics.actual_audio_duration_ms || '-') + 'ms' +
+        ' vmrToPlay=' + (metrics.vmr_to_actual_audio_ms != null ? metrics.vmr_to_actual_audio_ms : '-') + 'ms');
     } catch (e) {}
   }
 
@@ -1270,8 +1302,7 @@
       tts_total_duration_ms: ttsTotalDuration || null,
       lip_move_ms: lipMoveMs ? Math.round(lipMoveMs) : null,
       lip_sync_diff_ms: (ttsTotalDuration && lipMoveMs) ? Math.round(ttsTotalDuration - lipMoveMs) : null,
-      actual_audio_start_ms: actualAudioStart ? Math.round(actualAudioStart - tClick) : null,
-      actual_audio_end_ms: actualAudioEnd ? Math.round(actualAudioEnd - tClick) : null,
+      audio_end_to_playback_ms: (actualAudioStart && tAudioEnd) ? Math.round(actualAudioStart - tAudioEnd) : null,
       actual_audio_duration_ms: (actualAudioStart && actualAudioEnd) ? Math.round(actualAudioEnd - actualAudioStart) : null,
       vmr_to_actual_audio_ms: (avatarSpeakStart && actualAudioStart) ? Math.round(actualAudioStart - avatarSpeakStart) : null,
       total_interaction_ms: actualAudioEnd ? Math.round(actualAudioEnd - tClick)
@@ -1330,9 +1361,15 @@
 
   // ====== Timers ======
 
+  let flushTimer = null;
+
   function startCollectLoop() {
     if (collectTimer) clearInterval(collectTimer);
-    collectTimer = setInterval(collectAllStats, collectInterval);
+    if (flushTimer) clearInterval(flushTimer);
+    // Sub-sample every 500ms for fine-grained sync data
+    collectTimer = setInterval(collectSubSample, SUBSAMPLE_INTERVAL);
+    // Flush aggregated result every 2s (report interval)
+    flushTimer = setInterval(flushSubSamples, REPORT_INTERVAL);
   }
 
   function startPushLoop() {
@@ -1343,6 +1380,7 @@
   function stopAll() {
     stopped = true;
     if (collectTimer) { clearInterval(collectTimer); collectTimer = null; }
+    if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
     if (pushTimer) { clearInterval(pushTimer); pushTimer = null; }
   }
 
