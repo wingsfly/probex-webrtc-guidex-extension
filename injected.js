@@ -754,11 +754,6 @@
     // Instantaneous A/V sync: positive = video delayed more (mouth lags behind voice)
     now.avSyncDiffMs = (audioJbDelay != null && videoJbDelay != null) ? Math.round((videoJbDelay - audioJbDelay) * 100) / 100 : null;
 
-    // Debug: log first non-null JB values
-    if ((audioJbDelay != null || videoJbDelay != null) && !now._jbLogged) {
-      console.log('[ProbeX] JB delay: audio=' + (audioJbDelay?.toFixed(1) || '-') + 'ms video=' + (videoJbDelay?.toFixed(1) || '-') + 'ms sync=' + (now.avSyncDiffMs ?? '-') + 'ms');
-      now._jbLogged = true;
-    }
 
     // Packet loss
     let totalLostDelta = 0, totalRecvDelta = 0;
@@ -1116,7 +1111,6 @@
       }
       if (!audioTrack) { console.warn('[ProbeX] No live audio receiver track for energy detection'); return; }
 
-      console.log('[ProbeX] Audio energy detector: attached to track id=' + audioTrack.id + ' readyState=' + audioTrack.readyState);
 
       try {
         const detectCtx = new AudioContext();
@@ -1128,7 +1122,6 @@
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
         const SILENCE_THRESHOLD = 10; // RMS energy threshold (0-255 scale)
         let wasPlaying = false;
-        let peakRms = 0;
 
         const pollInterval = setInterval(() => {
           analyser.getByteFrequencyData(dataArray);
@@ -1136,20 +1129,16 @@
           let sum = 0;
           for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
           const rms = Math.sqrt(sum / dataArray.length);
-          if (rms > peakRms) peakRms = rms;
-
           const isPlaying = rms > SILENCE_THRESHOLD;
           if (isPlaying && !wasPlaying) {
             // Silence → Sound transition
             if (!actualAudioStart && finalAsrTime) { // only after ASR (ignore pre-existing audio)
               actualAudioStart = performance.now();
-              console.log('[ProbeX] Audio energy: SOUND detected (rms=' + rms.toFixed(1) + ' peak=' + peakRms.toFixed(1) + ')');
             }
             wasPlaying = true;
           } else if (!isPlaying && wasPlaying) {
             // Sound → Silence transition
             actualAudioEnd = performance.now();
-            console.log('[ProbeX] Audio energy: SILENCE (rms=' + rms.toFixed(1) + ' peak=' + peakRms.toFixed(1) + ')');
             wasPlaying = false;
           }
         }, 50); // 50ms polling = 20Hz, very lightweight
