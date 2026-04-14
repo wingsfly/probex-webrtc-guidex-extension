@@ -1003,7 +1003,7 @@
               { name: 'lip_sync_diff_ms', type: 'number', unit: 'ms', description: 'Client audio playback minus lip-move time (>0 = audio plays longer than mouth moves)', chartable: true },
               { name: 'audio_end_to_playback_ms', type: 'number', unit: 'ms', description: 'User done speaking → client hears reply audio', chartable: true },
               { name: 'actual_audio_duration_ms', type: 'number', unit: 'ms', description: 'Actual client-side audio playback duration', chartable: true },
-              { name: 'vmr_to_actual_audio_ms', type: 'number', unit: 'ms', description: 'vmr_status=1 → client hears audio (server-client delay)', chartable: true },
+              { name: 'vmr_to_actual_audio_ms', type: 'number', unit: 'ms', description: 'Lip sync: actualAudioStart - firstVmr1Time; negative = audio before lips', chartable: true },
               { name: 'total_interaction_ms', type: 'number', unit: 'ms', description: 'Button click → avatar finishes speaking', chartable: true },
               { name: 'cycle', type: 'number', description: 'Auto-test cycle number' },
               { name: 'page_url', type: 'string', description: 'Source page URL' },
@@ -1042,7 +1042,7 @@
         ' lipMove=' + (metrics.lip_move_ms || '-') + 'ms' +
         ' endToPlay=' + (metrics.audio_end_to_playback_ms || '-') + 'ms' +
         ' playDur=' + (metrics.actual_audio_duration_ms || '-') + 'ms' +
-        ' vmrToPlay=' + (metrics.vmr_to_actual_audio_ms != null ? metrics.vmr_to_actual_audio_ms : '-') + 'ms');
+        ' lipToPlay=' + (metrics.vmr_to_actual_audio_ms != null ? metrics.vmr_to_actual_audio_ms : '-') + 'ms');
     } catch (e) {}
   }
 
@@ -1313,7 +1313,7 @@
       lip_sync_diff_ms: (actualAudioStart && actualAudioEnd && lipMoveMs) ? Math.round((actualAudioEnd - actualAudioStart) - lipMoveMs) : null,
       audio_end_to_playback_ms: (actualAudioStart && tAudioEnd) ? Math.round(actualAudioStart - tAudioEnd) : null,
       actual_audio_duration_ms: (actualAudioStart && actualAudioEnd) ? Math.round(actualAudioEnd - actualAudioStart) : null,
-      vmr_to_actual_audio_ms: (avatarSpeakStart && actualAudioStart) ? Math.round(actualAudioStart - avatarSpeakStart) : null,
+      vmr_to_actual_audio_ms: (firstVmr1Time && actualAudioStart) ? Math.round(actualAudioStart - firstVmr1Time) : null,
       total_interaction_ms: actualAudioEnd ? Math.round(actualAudioEnd - tClick)
         : avatarSpeakEnd ? Math.round(avatarSpeakEnd - tClick)
         : ttsStartTime ? Math.round(ttsStartTime - tClick)
