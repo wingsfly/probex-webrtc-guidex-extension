@@ -26,10 +26,12 @@
 
   sendConfig();
 
-  // Also send stored audio and auto-test config if available
+  // Only send audio/autotest on the page where Capture was performed
   function sendAutoTestConfig() {
     try {
       chrome.storage.local.get(['autoTestAudio', 'autoTestConfig'], (stored) => {
+        const target = stored.autoTestConfig?.targetOrigin;
+        if (target && target !== location.origin) return; // not the captured page
         if (stored.autoTestAudio) {
           window.postMessage({ type: 'probex-audio', dataUrl: stored.autoTestAudio }, '*');
         }
@@ -48,29 +50,33 @@
   try {
     chrome.storage.onChanged.addListener((changes) => {
       if (changes.probexConfig) sendConfig();
-      // Relay audio file changes
-      if (changes.autoTestAudio?.newValue) {
-        window.postMessage({ type: 'probex-audio', dataUrl: changes.autoTestAudio.newValue }, '*');
-      }
-      // Relay auto-test start/stop
-      if (changes.autoTestConfig) {
-        const cfg = changes.autoTestConfig.newValue;
-        if (cfg?.running) {
-          // Always send audio first to ensure injected.js has it loaded
-          chrome.storage.local.get('autoTestAudio', (stored) => {
-            if (stored.autoTestAudio) {
-              window.postMessage({ type: 'probex-audio', dataUrl: stored.autoTestAudio }, '*');
+      // Relay audio/autotest only on the captured target page
+      if (changes.autoTestAudio?.newValue || changes.autoTestConfig) {
+        chrome.storage.local.get('autoTestConfig', (stored) => {
+          const target = stored.autoTestConfig?.targetOrigin;
+          if (target && target !== location.origin) return;
+
+          if (changes.autoTestAudio?.newValue) {
+            window.postMessage({ type: 'probex-audio', dataUrl: changes.autoTestAudio.newValue }, '*');
+          }
+          if (changes.autoTestConfig) {
+            const cfg = changes.autoTestConfig.newValue;
+            if (cfg?.running) {
+              chrome.storage.local.get('autoTestAudio', (s) => {
+                if (s.autoTestAudio) {
+                  window.postMessage({ type: 'probex-audio', dataUrl: s.autoTestAudio }, '*');
+                }
+                window.postMessage({
+                  type: 'probex-autotest-start',
+                  selector: cfg.selector,
+                  interval: cfg.interval,
+                }, '*');
+              });
+            } else {
+              window.postMessage({ type: 'probex-autotest-stop' }, '*');
             }
-            // Then start (injected.js will load audio before first cycle)
-            window.postMessage({
-              type: 'probex-autotest-start',
-              selector: cfg.selector,
-              interval: cfg.interval,
-            }, '*');
-          });
-        } else {
-          window.postMessage({ type: 'probex-autotest-stop' }, '*');
-        }
+          }
+        });
       }
     });
   } catch (e) {}
@@ -84,6 +90,7 @@
           autoTestConfig: {
             ...(JSON.parse(localStorage.getItem('__probex_atc') || '{}')),
             selector: event.data.selector,
+            targetOrigin: location.origin, // remember which page was captured
             running: false,
           },
         });
