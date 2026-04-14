@@ -1083,8 +1083,9 @@
     let avatarSpeakStart = 0;   // first vmr_status=1 (avatar mouth starts moving)
     let avatarSpeakEnd = 0;     // last vmr_status=2 (avatar finished all segments)
     let ttsTotalDuration = 0;   // sum of all tts_duration values in this cycle
-    let lipMoveMs = 0;          // total time mouth is moving (sum of vmr_status 1→2 segments)
-    let lastLipStart = 0;       // timestamp of most recent vmr_status=1
+    let lipMoveMs = 0;          // total time mouth is moving (sum of vmr_status 0/1→2 segments)
+    let lastLipStart = 0;       // timestamp of first vmr=0 or vmr=1 in current segment
+    let firstVmr1Time = 0;      // first vmr_status=1 (actual mouth movement, for tts_to_avatar_speak)
     let ttsSegmentCount = 0;    // number of tts_duration events received
     let lipSegmentCount = 0;    // number of vmr_status=2 events (completed lip segments)
     let actualAudioStart = 0;   // client-side: first moment audio energy detected
@@ -1203,8 +1204,9 @@
             // vmr_status=2: segment complete
             if (avatar.vmr_status === 0 || avatar.vmr_status === 1) {
               if (!avatarSpeakStart) avatarSpeakStart = performance.now();
-              // Use first vmr=0 or vmr=1 of each segment as lip start
               if (!lastLipStart) lastLipStart = performance.now();
+              // Track first vmr=1 specifically (actual mouth open, not just driver start)
+              if (avatar.vmr_status === 1 && !firstVmr1Time) firstVmr1Time = performance.now();
             }
             if (avatar.vmr_status === 2) {
               avatarSpeakEnd = performance.now();
@@ -1304,7 +1306,7 @@
       audio_start_to_first_asr_ms: firstAsrTime ? Math.round(firstAsrTime - tAudioStart) : null,
       audio_end_to_final_asr_ms: finalAsrTime ? Math.round(finalAsrTime - tAudioEnd) : null,
       audio_end_to_tts_ms: ttsStartTime ? Math.round(ttsStartTime - tAudioEnd) : null,
-      tts_to_avatar_speak_ms: (ttsStartTime && avatarSpeakStart) ? Math.round(avatarSpeakStart - ttsStartTime) : null,
+      tts_to_avatar_speak_ms: (ttsStartTime && firstVmr1Time) ? Math.round(firstVmr1Time - ttsStartTime) : null,
       avatar_speak_duration_ms: (avatarSpeakStart && avatarSpeakEnd) ? Math.round(avatarSpeakEnd - avatarSpeakStart) : null,
       tts_total_duration_ms: ttsTotalDuration || null,
       lip_move_ms: lipMoveMs ? Math.round(lipMoveMs) : null,
