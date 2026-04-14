@@ -832,12 +832,16 @@
     audioLoadPromise = (async () => {
       try {
         ensureAudioCtx();
-        const resp = await fetch(dataUrl);
-        const arrayBuf = await resp.arrayBuffer();
-        audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+        // Decode Base64 data URL directly (avoids fetch which can be blocked by CSP)
+        const base64 = dataUrl.split(',')[1];
+        if (!base64) throw new Error('Invalid data URL');
+        const binaryStr = atob(base64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+        audioBuffer = await audioCtx.decodeAudioData(bytes.buffer);
         console.log('[ProbeX] Audio loaded: ' + audioBuffer.duration.toFixed(1) + 's, ' + audioBuffer.numberOfChannels + ' ch, ' + audioBuffer.sampleRate + ' Hz');
       } catch (e) {
-        console.error('[ProbeX] Failed to decode audio:', e.message);
+        console.debug('[ProbeX] Audio decode skipped:', e.message);
         audioBuffer = null;
       }
     })();
