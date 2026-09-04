@@ -1160,16 +1160,31 @@
         if (typeof ev.data !== 'string') return;
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.code !== 0 || !msg.data?.result) return;
-          const result = msg.data.result;
-          // Extract recognized words
-          const words = (result.ws || []).flatMap(w => (w.cw || []).map(c => c.w)).join('').trim();
+          let words = '', isFinal = false;
+
+          // New GuideX protocol: header.action "h5VoiceInput", recognized text
+          // lives in payload.data.data (a nested JSON string).
+          if (msg?.header?.action === 'h5VoiceInput' && msg?.payload?.data?.data) {
+            let inner;
+            try { inner = JSON.parse(msg.payload.data.data); } catch { return; }
+            if (inner.code !== 0 || !inner.data) return;
+            words = (inner.data.sourceText || inner.data.subtitleText || '').trim();
+            isFinal = msg.header.status === 2;
+          }
+          // Legacy iFlytek IAT protocol: code:0 → data.result.ws[].cw[].w
+          else if (msg.code === 0 && msg.data?.result) {
+            const result = msg.data.result;
+            words = (result.ws || []).flatMap(w => (w.cw || []).map(c => c.w)).join('').trim();
+            isFinal = result.ls === true && msg.data.status === 2;
+          } else {
+            return;
+          }
 
           if (words && !firstAsrTime) {
             firstAsrTime = performance.now();
             firstAsrText = words;
           }
-          if (result.ls === true && msg.data.status === 2) {
+          if (isFinal) {
             finalAsrTime = performance.now();
             finalAsrText = words || firstAsrText || '';
           }
