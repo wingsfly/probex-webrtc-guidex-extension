@@ -1093,6 +1093,7 @@
     let audioEnergyMonitor = null; // cleanup handle for energy detection
     let asrListener = null;
     let interactListener = null;
+    let autoReportListener = null;
 
     // ---- Client-side audio playback detection via AnalyserNode ----
     // Taps into the WebRTC audio receiver track to detect when sound actually plays.
@@ -1232,6 +1233,23 @@
         } catch (e) {}
       };
       interactWs.addEventListener('message', interactListener);
+
+      // autoReport WS carries the TTS audio in the new GuideX protocol (the old
+      // interact "tts_duration" event is gone). The first textChat message with
+      // isAudioDriver after ASR marks TTS start.
+      const autoReportWs = window.__probexWsList.find(ws => ws.url?.includes('/autoReport') && ws.readyState === WebSocket.OPEN);
+      if (autoReportWs) {
+        autoReportListener = (ev) => {
+          if (typeof ev.data !== 'string') return;
+          try {
+            const m = JSON.parse(ev.data);
+            if (finalAsrTime && !ttsStartTime && m?.header?.action === 'textChat' && m?.payload?.data?.isAudioDriver) {
+              ttsStartTime = performance.now();
+            }
+          } catch (e) {}
+        };
+        autoReportWs.addEventListener('message', autoReportListener);
+      }
     }
 
     console.log('[ProbeX] Auto-test cycle #' + cycleNum + ': clicking button');
@@ -1294,7 +1312,7 @@
         checks++;
         const elapsed = checks * 100;
         if (!finalAsrTime && elapsed > 15000) { clearInterval(check); resolve(); return; }
-        if (finalAsrTime && !ttsStartTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
+        if (finalAsrTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
         // Check if all known segments completed
         if (ttsSegmentCount > 0 && lipSegmentCount >= ttsSegmentCount) {
           if (!allMatchedAt) allMatchedAt = performance.now();
@@ -1341,6 +1359,10 @@
     if (interactListener) {
       const iws = window.__probexWsList.find(ws => ws.url?.includes('/v1/interact'));
       if (iws) iws.removeEventListener('message', interactListener);
+    }
+    if (autoReportListener) {
+      const aws = window.__probexWsList.find(ws => ws.url?.includes('/autoReport'));
+      if (aws) aws.removeEventListener('message', autoReportListener);
     }
     if (audioEnergyMonitor) audioEnergyMonitor();
 
