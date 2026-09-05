@@ -1,5 +1,7 @@
 # ProbeX WebRTC + Guidex Chrome Extension
 
+> English | [中文](README.zh.md)
+
 Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browser pages, with specialized support for iFlytek Guidex digital human interaction testing.
 
 ## Features
