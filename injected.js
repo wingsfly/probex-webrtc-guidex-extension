@@ -300,27 +300,34 @@
       const blob = new Blob([workerCode], { type: 'application/javascript' });
       const worker = new Worker(URL.createObjectURL(blob));
 
+      // Resolve with the moment the FIRST frame is actually sent, so the caller
+      // can anchor tAudioStart at real audio onset — excluding pre-encoding and
+      // worker-spawn setup (~300ms) that otherwise inflated the injection window
+      // and desynced audio_start_to_first_asr from audio_end_to_final_asr.
+      let firstFrameAt = 0;
+
       worker.onmessage = (e) => {
         if (e.data.done) {
           worker.terminate();
           URL.revokeObjectURL(blob);
           console.log('[ProbeX] Test audio send complete (' + e.data.sent + '/' + totalChunks + ' chunks)');
-          resolve();
+          resolve(firstFrameAt || performance.now());
           return;
         }
         const idx = e.data.idx;
         if (ws.readyState !== WebSocket.OPEN) {
           worker.terminate();
           console.warn('[ProbeX] WS closed during send at chunk ' + idx);
-          resolve();
+          resolve(firstFrameAt || performance.now());
           return;
         }
         try {
+          if (idx === 0) firstFrameAt = performance.now();
           origSendRef(JSON.stringify({ status: 1, message: encodedChunks[idx] }));
         } catch (err) {
           console.error('[ProbeX] WS send error:', err.message);
           worker.terminate();
-          resolve();
+          resolve(firstFrameAt || performance.now());
         }
       };
 
@@ -1320,11 +1327,12 @@
 
     await new Promise(r => setTimeout(r, 800));
 
-    // ---- Timing: t_audio_start ----
-    const tAudioStart = performance.now();
+    // ---- Timing ---- playTestAudio resolves with the actual first-frame send
+    // time; anchor tAudioStart there so the audio window = real send span
+    // (setup/encoding excluded), keeping it ≈ audio_duration.
     console.log('[ProbeX] Auto-test cycle #' + cycleNum + ': VD ready, playing audio');
 
-    await playTestAudio();
+    const tAudioStart = await playTestAudio();
 
     // ---- Timing: t_audio_end ----
     const tAudioEnd = performance.now();
