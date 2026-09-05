@@ -18,21 +18,65 @@ Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browse
 
 ### Interaction Timing Metrics
 
-| Short Name | Field | Description |
-|-----------|-------|-------------|
-| Click->VD | `click_to_vd_ready_ms` | Button click to voiceDictation session ready |
-| 1st ASR | `audio_start_to_first_asr_ms` | First word latency |
-| ASR Tail | `audio_end_to_final_asr_ms` | Speech end to final ASR result |
-| Wait TTS | `audio_end_to_tts_ms` | Speech end to TTS synthesis start |
-| TTS->Lip | `tts_to_avatar_speak_ms` | TTS event to avatar mouth movement (vmr=1) |
-| Avatar Dur | `avatar_speak_duration_ms` | Total avatar speaking wall-clock time |
-| TTS Len | `tts_total_duration_ms` | TTS synthesized audio length (raw, ~1.5x playback speed) |
-| Lip Move | `lip_move_ms` | Cumulative lip movement duration |
-| Lip Sync | `lip_sync_diff_ms` | `actual_audio_duration - lip_move` |
-| Wait Play | `audio_end_to_playback_ms` | Speech end to hearing reply audio |
-| Play Dur | `actual_audio_duration_ms` | Client-side audio playback duration (AnalyserNode RMS detection) |
-| Lip->Play | `vmr_to_actual_audio_ms` | A/V sync: `actualAudioStart - firstVmr1Time`; negative = audio ahead |
-| Total | `total_interaction_ms` | End-to-end total time |
+Reported under the `guidex-interaction` probe, one row per auto-test cycle.
+Metrics are grouped along the interaction lifecycle. A field is `null` when its
+event never fired (e.g. every downlink metric is null when ASR fails), which is
+the primary failure signal.
+
+**Timeline anchors** (all marked in-page by the extension):
+
+| Anchor | When |
+|--------|------|
+| `tClick` | Trigger button clicked (interaction start) |
+| `tVdReady` | voiceDictation WebSocket session ready |
+| `tAudioStart` / `tAudioEnd` | Injected test audio start / end ("user speaking") |
+| `firstAsrTime` / `finalAsrTime` | First ASR word / final ASR result returned |
+| `ttsStartTime` | First TTS synthesis event (autoReport WS `textChat` + `isAudioDriver`) |
+| `firstVmr1Time` | Avatar mouth starts moving (`vmr_status=1`) |
+| `actualAudioStart` / `actualAudioEnd` | Client actually hears reply audio start / end (AnalyserNode RMS) |
+
+**Status / identity**
+
+| Field | Meaning |
+|-------|---------|
+| `success` | Whether speech was recognized (`firstAsrText` non-empty) |
+| `asr_text` | Recognized text (final result, falls back to first word) |
+| `audio_duration_ms` | Raw duration of the injected test audio (decoded WAV) |
+| `page_url` | Page URL where the interaction ran |
+| `cycle` | Auto-test cycle number |
+
+**Uplink — click → speak → recognize**
+
+| Short Name | Field | Formula | Description |
+|-----------|-------|---------|-------------|
+| Click->VD | `click_to_vd_ready_ms` | `tVdReady − tClick` | Click to voice session ready |
+| 1st ASR | `audio_start_to_first_asr_ms` | `firstAsrTime − tAudioStart` | First-word latency |
+| ASR Tail | `audio_end_to_final_asr_ms` | `finalAsrTime − tAudioEnd` | Speech end to final ASR result |
+
+**Downlink — understand → synthesize → avatar speaks**
+
+| Short Name | Field | Formula | Description |
+|-----------|-------|---------|-------------|
+| Wait TTS | `audio_end_to_tts_ms` | `ttsStartTime − tAudioEnd` | Speech end to first TTS event (incl. LLM think time) |
+| TTS->Lip | `tts_to_avatar_speak_ms` | `firstVmr1Time − ttsStartTime` | TTS event to avatar mouth movement |
+| Wait Play | `audio_end_to_playback_ms` | `actualAudioStart − tAudioEnd` | Speech end to actually hearing reply (subjective wait) |
+
+**Playback / lip-sync**
+
+| Short Name | Field | Formula | Description |
+|-----------|-------|---------|-------------|
+| Play Dur | `actual_audio_duration_ms` | `actualAudioEnd − actualAudioStart` | Client-side reply-audio playback duration (RMS) |
+| TTS Len | `tts_total_duration_ms` | Σ segments | Raw TTS synthesized length (~1.5× playback speed) |
+| Avatar Dur | `avatar_speak_duration_ms` | `avatarSpeakEnd − avatarSpeakStart` | Total avatar speaking wall-clock time |
+| Lip Move | `lip_move_ms` | Σ(`vmr` 1→2) | Cumulative time the mouth is actually moving |
+| Lip Sync | `lip_sync_diff_ms` | `actual_audio_duration − lip_move` | >0 = audio plays longer than the mouth moves |
+| Lip->Play | `vmr_to_actual_audio_ms` | `actualAudioStart − firstVmr1Time` | A/V sync; negative = audio ahead of lips |
+
+**Total**
+
+| Short Name | Field | Formula | Description |
+|-----------|-------|---------|-------------|
+| Total | `total_interaction_ms` | `actualAudioEnd − tClick` (falls back to avatarSpeakEnd → ttsStart → finalAsr) | End-to-end: click to reply-audio playback end |
 
 ### WebRTC Quality Metrics (Guidex Sim)
 
