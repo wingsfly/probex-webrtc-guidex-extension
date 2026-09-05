@@ -1343,15 +1343,18 @@
     // between segments, so any short quiet-window exits mid-reply and truncates
     // it (measured: avatar_dur collapsed 14s→1s). The tts_duration segment count
     // that used to bound this is gone with the protocol change, so we fall back
-    // to a fixed timeout sized to cover the full reply plus slow-cycle outliers
-    // (reply ends ~16s after tAudioEnd; a 7.7s wait_play spike was seen → 25s).
+    // to a fixed timeout sized to cover the full reply plus slow-cycle outliers.
+    // Sizing: reply content grew from ~13s to ~18-22s (avatar_dur), which starts
+    // ~2s after tAudioEnd — so the reply now ends ~24s after tAudioEnd and the old
+    // 25s left almost no margin (longest replies were near the ceiling). 35s
+    // restores headroom against further content growth and slow-cycle spikes.
     await new Promise((resolve) => {
       let checks = 0;
       const check = setInterval(() => {
         checks++;
         const elapsed = checks * 100;
         if (!finalAsrTime && elapsed > 15000) { clearInterval(check); resolve(); return; }
-        if (finalAsrTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
+        if (finalAsrTime && elapsed > 35000) { clearInterval(check); resolve(); return; }
         if (elapsed > 60000) { clearInterval(check); resolve(); return; }
       }, 100);
     });
