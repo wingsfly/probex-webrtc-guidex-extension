@@ -85,6 +85,29 @@ worker 用 `setTimeout(tick, 40)`(相对调度),把每次 tick 的 postMessage/�
 
 ---
 
-## 3. 待分析
-- `audio_end_to_tts_ms`(Wait TTS)—— 理解→合成首个 TTS 事件(含大模型思考)
-- `tts_to_avatar_speak_ms` / `audio_end_to_playback_ms` / 唇形同步系列
+## 3. `audio_end_to_tts_ms`(Wait TTS)
+
+图表短名 **Wait TTS**;定义 `ttsStartTime − tAudioEnd`(说完话 → 首个 TTS 事件)。
+`ttsStartTime` 打点在 autoReport WS 的 `textChat`+`isAudioDriver` 事件(服务端真实触发时刻)。
+
+### 3.1 数据(20.4,最近 2h,n=117)
+avg **1485ms**,范围 1025~1845,96% 落在 1200~1800(比固定量指标离散大)。
+
+### 3.2 构成(Wait TTS 包含 ASR Tail)
+| 段 | 值 | 含义 |
+|----|----|------|
+| ASR Tail(说完→最终识别) | ~430ms | 前置步骤 |
+| **final ASR → 首个 TTS 事件** | **~870~1050ms** | **大模型生成回复 + 触发 TTS(主导)** |
+| = Wait TTS | ~1300~1485ms | |
+
+`Wait TTS ≈ ASR Tail(~430) + LLM 生成并启动 TTS(~900,主导且波动最大)`
+
+### 3.3 结论
+- 主导项 ~900ms 是**服务端对话模型**对固定问句生成应答的延迟;输入固定却有 ~800ms 抖动 → **模型/后端负载波动**,非确定性。
+- 对 LLM 数字人 ~1.5s 才开始合成属可接受但不算快;杠杆在服务端(流式首 token、更热/更小模型),**插件侧无可优化**、测量准确。
+
+---
+
+## 4. 待分析
+- `audio_end_to_playback_ms`(Wait Play)/ `actual_audio_duration_ms`
+- `tts_to_avatar_speak_ms` / 唇形同步系列(lip_move / lip_sync_diff / vmr_to_actual_audio)
