@@ -102,6 +102,8 @@
   window.__probexWsList = [];
   let voiceDictationWs = null;
   let vdSendCount = 0;
+  let vdOpenTime = 0;       // performance.now() when the voiceDictation WS 'open' fires
+  let vdFirstSendTime = 0;  // performance.now() of the first send on that WS
 
   const OrigWebSocket = window.WebSocket;
   window.WebSocket = function (url, protocols) {
@@ -112,7 +114,13 @@
     if (url.includes('voiceDictation')) {
       voiceDictationWs = ws;
       vdSendCount = 0;
+      vdOpenTime = 0;
+      vdFirstSendTime = 0;
       console.log('[ProbeX] voiceDictation WebSocket detected!');
+      // Event-based readiness打点: mark the exact 'open' moment (TCP+TLS+WS
+      // upgrade done) instead of a 100ms poll noticing it later.
+      if (ws.readyState === OrigWebSocket.OPEN) vdOpenTime = performance.now();
+      else ws.addEventListener('open', () => { if (!vdOpenTime) vdOpenTime = performance.now(); });
       ws.addEventListener('message', (ev) => {
         if (typeof ev.data === 'string') {
           console.log('[ProbeX][VD] recv: ' + ev.data.slice(0, 300));
@@ -143,6 +151,7 @@
   WebSocket.prototype.send = function (data) {
     if (this === voiceDictationWs || (this.url && this.url.includes('voiceDictation'))) {
       vdSendCount++;
+      if (!vdFirstSendTime) vdFirstSendTime = performance.now();
       if (vdSendCount <= 10) {
         if (data instanceof ArrayBuffer) {
           const hex = Array.from(new Uint8Array(data.slice(0, 32))).map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -1003,7 +1012,8 @@
               { name: 'success', type: 'boolean', description: 'Whether ASR recognized speech', chartable: false },
               { name: 'asr_text', type: 'string', description: 'Recognized text from ASR' },
               { name: 'audio_duration_ms', type: 'number', unit: 'ms', description: 'Duration of injected test audio', chartable: true },
-              { name: 'click_to_vd_ready_ms', type: 'number', unit: 'ms', description: 'Button click → voiceDictation WS init', chartable: true },
+              { name: 'click_to_vd_open_ms', type: 'number', unit: 'ms', description: 'Button click → voiceDictation WS open (TCP+TLS+WS upgrade)', chartable: true },
+              { name: 'click_to_vd_ready_ms', type: 'number', unit: 'ms', description: 'Button click → first frame sent on voiceDictation WS', chartable: true },
               { name: 'audio_start_to_first_asr_ms', type: 'number', unit: 'ms', description: 'Audio send start → first word recognized', chartable: true },
               { name: 'audio_end_to_final_asr_ms', type: 'number', unit: 'ms', description: 'Audio send end → final ASR result', chartable: true },
               { name: 'audio_end_to_tts_ms', type: 'number', unit: 'ms', description: 'User done speaking → first TTS synthesis event', chartable: true },
@@ -1281,8 +1291,11 @@
       }, 100);
     });
 
-    // ---- Timing: t_vd_ready ----
-    const tVdReady = performance.now();
+    // ---- Timing: t_vd_ready ---- use the event-recorded timestamps (WS open /
+    // first send), not performance.now() here, so the ~100ms poll granularity no
+    // longer inflates the metric. Fall back to now() if a stamp is missing.
+    const tVdOpen = vdOpenTime || 0;
+    const tVdReady = vdFirstSendTime || vdOpenTime || performance.now();
 
     if (!vdReady) {
       console.warn('[ProbeX] Auto-test cycle #' + cycleNum + ': VD not ready, skipping');
@@ -1346,6 +1359,7 @@
       cycle: cycleNum,
       page_url: location.href,
       audio_duration_ms: Math.round(audioBuffer.duration * 1000),
+      click_to_vd_open_ms: tVdOpen ? Math.round(tVdOpen - tClick) : null,
       click_to_vd_ready_ms: Math.round(tVdReady - tClick),
       audio_start_to_first_asr_ms: firstAsrTime ? Math.round(firstAsrTime - tAudioStart) : null,
       audio_end_to_final_asr_ms: finalAsrTime ? Math.round(finalAsrTime - tAudioEnd) : null,

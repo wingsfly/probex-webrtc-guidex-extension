@@ -29,7 +29,8 @@
 | 锚点 | 时机 |
 |------|------|
 | `tClick` | 点击触发按钮（交互起点） |
-| `tVdReady` | voiceDictation WebSocket 会话就绪 |
+| `tVdOpen` | voiceDictation WebSocket `open` 事件(握手完成) |
+| `tVdReady` | voiceDictation WS 上发出首帧（会话就绪） |
 | `tAudioStart` / `tAudioEnd` | 注入测试音频的开始 / 结束（“用户说话”起止） |
 | `firstAsrTime` / `finalAsrTime` | 首个 ASR 词 / 最终 ASR 结果返回 |
 | `ttsStartTime` | 首个 TTS 合成事件（autoReport WS `textChat` + `isAudioDriver`） |
@@ -50,9 +51,14 @@
 
 | 短名 | 字段 | 公式 | 含义 |
 |------|------|------|------|
-| Click->VD | `click_to_vd_ready_ms` | `tVdReady − tClick` | 点击到语音会话就绪 |
+| Click->Open | `click_to_vd_open_ms` | `tVdOpen − tClick` | 点击到 voiceDictation WS **open**——GuideX 点击处理 + 会话/token 请求 + 全新 WSS 握手（TCP+TLS+WS Upgrade） |
+| Click->VD | `click_to_vd_ready_ms` | `tVdReady − tClick` | 点击到 WS 上发出首帧（会话就绪）。`ready − open` = open 后应用初始化（约数 ms） |
 | 1st ASR | `audio_start_to_first_asr_ms` | `firstAsrTime − tAudioStart` | 首字延迟 |
 | ASR Tail | `audio_end_to_final_asr_ms` | `finalAsrTime − tAudioEnd` | 说完到出最终 ASR 结果 |
+
+> `tVdOpen` / `tVdReady`由 WS 的 `open` 事件与其上首次 `send()` **事件打点**（非轮询），
+> 因此不含轮询量化误差。每轮交互都**新开**一条 voiceDictation WSS（零复用），所以
+> `click_to_vd_open_ms` 主要由到端点的握手往返决定。
 
 **下行 —— 理解 → 合成 → 数字人开口**
 

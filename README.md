@@ -30,7 +30,8 @@ the primary failure signal.
 | Anchor | When |
 |--------|------|
 | `tClick` | Trigger button clicked (interaction start) |
-| `tVdReady` | voiceDictation WebSocket session ready |
+| `tVdOpen` | voiceDictation WebSocket `open` event (handshake done) |
+| `tVdReady` | First frame sent on the voiceDictation WS (session ready) |
 | `tAudioStart` / `tAudioEnd` | Injected test audio start / end ("user speaking") |
 | `firstAsrTime` / `finalAsrTime` | First ASR word / final ASR result returned |
 | `ttsStartTime` | First TTS synthesis event (autoReport WS `textChat` + `isAudioDriver`) |
@@ -51,9 +52,15 @@ the primary failure signal.
 
 | Short Name | Field | Formula | Description |
 |-----------|-------|---------|-------------|
-| Click->VD | `click_to_vd_ready_ms` | `tVdReady − tClick` | Click to voice session ready |
+| Click->Open | `click_to_vd_open_ms` | `tVdOpen − tClick` | Click to voiceDictation WS **open** — GuideX click handler + any session/token API + fresh WSS handshake (TCP+TLS+WS upgrade) |
+| Click->VD | `click_to_vd_ready_ms` | `tVdReady − tClick` | Click to first frame sent on the WS (session ready). `ready − open` = app init after open (~few ms) |
 | 1st ASR | `audio_start_to_first_asr_ms` | `firstAsrTime − tAudioStart` | First-word latency |
 | ASR Tail | `audio_end_to_final_asr_ms` | `finalAsrTime − tAudioEnd` | Speech end to final ASR result |
+
+> `tVdOpen` / `tVdReady` are stamped from the WS `open` event and the first
+> `send()` on it (event-based), not a poll — so the metric carries no polling
+> quantization. A fresh voiceDictation WSS is opened **per cycle** (no reuse), so
+> `click_to_vd_open_ms` is dominated by the handshake round-trips to the endpoint.
 
 **Downlink — understand → synthesize → avatar speaks**
 
