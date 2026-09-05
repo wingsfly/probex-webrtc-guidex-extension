@@ -349,6 +349,10 @@
   let hubUrl = 'http://localhost:8080';
   let probeName = 'webrtc-browser';
   let agentId = '';
+  // Per-page-load id: agentId lives in chrome.storage (shared by all tabs/pages of
+  // one browser profile), so same machine+profile → same agentId across pages.
+  // nodeId distinguishes individual pages/tabs of that same agent.
+  const nodeId = 'pg-' + Math.random().toString(36).slice(2, 8);
   let collectInterval = 2000;
   let pushInterval = 5000;
   let enabled = true;
@@ -628,6 +632,7 @@
           body: JSON.stringify({
             task_id: `ext_${probeName}`,
             agent_id: agentId,
+            node_id: nodeId,
             results: probeResults,
           }),
         }
@@ -1060,6 +1065,7 @@
         body: JSON.stringify({
           task_id: 'ext_' + INTERACTION_PROBE_NAME,
           agent_id: agentId,
+          node_id: nodeId,
           results: [{
             timestamp: new Date().toISOString(),
             success: metrics.success,
