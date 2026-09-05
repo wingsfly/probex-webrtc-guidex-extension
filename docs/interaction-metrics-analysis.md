@@ -164,5 +164,27 @@ avg **2203ms**,96%(94/98)在 2000~2500;偶发离群(见过 7723ms,某轮 LLM/TTS
 
 ---
 
-## 6. 待分析
-- `tts_to_avatar_speak_ms`(TTS→动嘴)/ `vmr_to_actual_audio_ms`(唇音同步细节)
+## 6. `tts_to_avatar_speak_ms`(TTS→Lip)
+
+定义 `firstVmr1Time − ttsStartTime`(server 宣告音频驱动回复开始 → 数字人首次动嘴 vmr=1),即**数字人首帧口型启动延迟**。
+
+### 6.1 数据(20.4,最近 3h,n=191)
+avg **726ms**,范围 447~1081,84% 在 600~800(输入固定,较稳)。
+
+### 6.2 含义与定位
+这 ~730ms 全在服务端:TTS 合成首块音频 → 生成 viseme(口型)→ avatar 驱动器吐首个 vmr=1。
+在感知链路中:
+```
+说完 →(wait_tts ~1290)→ TTS开始 →(tts_to_lip ~730)→ 动嘴 →(~80ms)→ 听见
+wait_play ≈ 1290 + 730 + 80 ≈ 2100 ✓(自洽)
+```
+是 ~2.1s 主观等待里的一段;`lip_vs_audio ~75ms`(嘴比声音早 ~80ms),音画同步良好。
+
+### 6.3 结论
+- ~730ms 首帧口型延迟对云端数字人正常;**全在 GuideX 后端**(TTS 首块 + viseme + 驱动),插件测量准确、无可优化。
+- 杠杆在服务端(流式 TTS + 更快首块 viseme)。
+
+---
+
+## 7. 待分析
+- `vmr_to_actual_audio_ms`(唇音同步细节:口型 vs 声音先后)
