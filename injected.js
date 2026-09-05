@@ -278,17 +278,23 @@
       // Use a Web Worker for accurate timing even when tab is hidden.
       // Worker timers are NOT throttled by Chrome's background tab policy.
       const workerCode = `
-        let idx = 0, total = 0, interval = 40;
+        let idx = 0, total = 0, interval = 40, t0 = 0;
         self.onmessage = (e) => {
           total = e.data.total;
           interval = e.data.interval;
+          t0 = performance.now();
           tick();
         };
         function tick() {
           if (idx >= total) { self.postMessage({ done: true, sent: idx }); return; }
           self.postMessage({ idx: idx });
           idx++;
-          setTimeout(tick, interval);
+          // Absolute-target scheduling: aim each frame at t0 + idx*interval and
+          // derive the delay from the real clock, so per-tick overhead can't
+          // accumulate. A plain setTimeout(interval) drifted ~14% slow (a 3326ms
+          // clip took ~3803ms), which desynced tAudioEnd from real audio length.
+          const delay = Math.max(0, t0 + idx * interval - performance.now());
+          setTimeout(tick, delay);
         }
       `;
       const blob = new Blob([workerCode], { type: 'application/javascript' });
