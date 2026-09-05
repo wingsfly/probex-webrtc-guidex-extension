@@ -458,23 +458,22 @@
   function flushSubSamples() {
     if (subSamples.length === 0) return;
 
-    // Aggregate: take max of sync metrics, last value of others
-    const last = subSamples[subSamples.length - 1];
-    const aggregated = { ...last };
-
-    // JB delay: audio and video come from different PCs (separate sub-samples).
-    // Collect the latest non-null value for each, then compute cross-PC sync diff.
-    let latestAudioJb = null;
-    let latestVideoJb = null;
+    // Audio and video come from different PeerConnections, so each sub-sample
+    // only carries one side's fields. Merge across the whole window: take the
+    // latest non-null value of every field. (Previously this took just the last
+    // sub-sample, which dropped the other PC's fields — that's why video_jitter/
+    // fps/frames_decoded went null while video_jb_delay_ms, handled separately,
+    // still reported.)
+    const aggregated = {};
     for (const s of subSamples) {
-      if (s.audioJbDelayMs != null) latestAudioJb = s.audioJbDelayMs;
-      if (s.videoJbDelayMs != null) latestVideoJb = s.videoJbDelayMs;
+      for (const k in s) {
+        if (s[k] != null) aggregated[k] = s[k];
+      }
     }
-    if (latestAudioJb != null) aggregated.audioJbDelayMs = latestAudioJb;
-    if (latestVideoJb != null) aggregated.videoJbDelayMs = latestVideoJb;
-    // Compute sync diff across PCs (positive = video lags behind audio)
-    aggregated.avSyncDiffMs = (latestAudioJb != null && latestVideoJb != null)
-      ? Math.round((latestVideoJb - latestAudioJb) * 100) / 100 : null;
+    // A/V sync across PCs (positive = video lags behind audio)
+    aggregated.avSyncDiffMs = (aggregated.audioJbDelayMs != null && aggregated.videoJbDelayMs != null)
+      ? Math.round((aggregated.videoJbDelayMs - aggregated.audioJbDelayMs) * 100) / 100
+      : null;
 
     resultBuffer.push({
       timestamp: new Date().toISOString(),
