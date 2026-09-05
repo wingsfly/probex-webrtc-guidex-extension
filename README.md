@@ -34,6 +34,37 @@ Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browse
 | Lip->Play | `vmr_to_actual_audio_ms` | A/V sync: `actualAudioStart - firstVmr1Time`; negative = audio ahead |
 | Total | `total_interaction_ms` | End-to-end total time |
 
+### WebRTC Quality Metrics (Guidex Sim)
+
+Sampled browser-side from `RTCPeerConnection.getStats()` every push interval
+(default 2s) and reported under the `Guidex Sim` probe. Fields marked *hidden*
+carry `default_hidden` in the output schema (off by default in the chart, still
+toggleable in the legend).
+
+| Field | Description | getStats source |
+|-------|-------------|-----------------|
+| `latency_ms` | End-to-end round-trip time (ms) | `remote-inbound-rtp.roundTripTime`×1000 (fallback candidate-pair RTT) |
+| `packet_loss_pct` | Packet loss (%) | packetsLost / (packetsReceived + packetsLost) delta ×100 |
+| `download_bps` | Inbound bitrate | inbound-rtp `bytesReceived` delta ×8 / interval |
+| `upload_bps` | Outbound bitrate | outbound-rtp `bytesSent` delta ×8 / interval |
+| `audio_jitter` | Audio RTP interarrival jitter (ms) | inbound-rtp(audio) `jitter`×1000 |
+| `video_jitter` | Video RTP interarrival jitter (ms) | inbound-rtp(video) `jitter`×1000 |
+| `video_fps` | Video frame rate (fps) | inbound-rtp(video) `framesPerSecond` |
+| `video_frames_decoded` *hidden* | Decoded frames in interval | inbound-rtp(video) `framesDecoded` delta |
+| `video_frames_dropped` *hidden* | Dropped frames in interval | inbound-rtp(video) `framesDropped` delta |
+| `audio_jb_delay_ms` | Audio jitter-buffer playout delay (ms) | (`jitterBufferDelay` delta / `jitterBufferEmittedCount` delta)×1000 |
+| `video_jb_delay_ms` | Video jitter-buffer playout delay (ms) | same, video inbound-rtp |
+| `av_sync_diff_ms` | A/V sync: latest videoJB − audioJB (ms) | >0 = video lags audio |
+| `available_outgoing_bitrate` *hidden* | Estimated available upload bandwidth (bps) | candidate-pair `availableOutgoingBitrate` |
+| `connection_count` *hidden* | Active PeerConnection count | number of tracked PCs |
+| `quality_limitation` | Encoder quality-limitation reason | outbound-rtp(video) `qualityLimitationReason` (cpu/bandwidth/none) |
+| `page_url` | Source page URL | `location.href` |
+
+> Note: `video_jitter` / `video_fps` / `video_frames_decoded` are derived from
+> *decoded frames* — if the avatar stream carries no decoded video frames
+> (`framesDecoded` stays 0, e.g. canvas/audio-driven rendering), these read as
+> null/0 while `video_jb_delay_ms` may still report (the track exists).
+
 ## Architecture
 
 ```
