@@ -1178,7 +1178,9 @@
             actualAudioEnd = performance.now();
             wasPlaying = false;
           }
-        }, 50); // 50ms polling = 20Hz, very lightweight
+        }, 20); // 20ms polling = 50Hz; tighter start/end detection (was 50ms,
+                // which added up to ~50ms lag to actualAudioStart/End → Wait Play
+                // and actual_audio_duration). Still lightweight.
 
         audioEnergyMonitor = () => {
           clearInterval(pollInterval);

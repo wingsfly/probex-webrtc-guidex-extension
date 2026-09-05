@@ -108,6 +108,34 @@ avg **1485ms**,范围 1025~1845,96% 落在 1200~1800(比固定量指标离散大
 
 ---
 
-## 4. 待分析
-- `audio_end_to_playback_ms`(Wait Play)/ `actual_audio_duration_ms`
+## 4. `audio_end_to_playback_ms`(Wait Play)
+
+图表短名 **Wait Play**;定义 `actualAudioStart − tAudioEnd`(说完话 → 客户端**真正听到**回复音频)。
+`actualAudioStart` 由 AnalyserNode RMS 能量检测(仅在 finalAsrTime 之后计),是**最贴近用户主观等待**的指标。
+
+### 4.1 数据(20.4,最近 2h,n=98)
+avg **2203ms**,96%(94/98)在 2000~2500;偶发离群(见过 7723ms,某轮 LLM/TTS 卡顿)。
+
+### 4.2 全链路拆解
+| 段 | 值 | 性质 |
+|----|----|------|
+| ASR Tail(说完→最终识别) | ~430ms | 服务端 ASR 收尾 |
+| LLM 生成回复(final ASR→TTS 事件) | ~870ms | 服务端大模型(主导波动) |
+| TTS 首块合成+下发+检测(TTS 事件→听见) | ~790ms | 服务端 TTS + WebRTC 下发 |
+| = **Wait Play** | **~2100ms** | 说完→听见 |
+
+`Wait Play ≈ ASR(430) + LLM(870) + TTS 合成下发(790)`,三块全在服务端。
+
+### 4.3 音画同步(健康)
+`tts_to_lip` ~700ms vs `tts_to_play` ~790ms → **嘴比声音早 ~80ms**;`vmr_to_actual_audio_ms` 实测 65~107ms(正值小、口型略领先声音),属自然同步,无明显唇音错位。
+
+### 4.4 结论与改动
+- ~2.2s 主观等待对 LLM+TTS 数字人属偏高但正常;三大块全在 GuideX 后端,**插件无可优化**。
+- 插件侧测量偏差:`actualAudioStart/End` 原用 **50ms RMS 轮询**,给 Wait Play / `actual_audio_duration_ms` 带 ~25~50ms 正向滞后。**已将轮询 50ms→20ms**(commit 见 git log),提检测精度。
+- 服务端优化杠杆:**流式 TTS(边合成边下发)** 可砍掉 ~790ms 首块等待;更快 LLM 砍 ~870ms。
+
+---
+
+## 5. 待分析
+- `actual_audio_duration_ms` / `tts_total_duration_ms`(播放时长 vs 合成时长)
 - `tts_to_avatar_speak_ms` / 唇形同步系列(lip_move / lip_sync_diff / vmr_to_actual_audio)
