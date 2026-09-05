@@ -162,6 +162,26 @@ toggleable in the legend).
 - **Push Interval**: Stats aggregation window (default 2s)
 - **Auto-Test**: Capture a page button, upload test audio, set interval, start cycling
 
+## Multiple clients (distinguishing who's who)
+
+All clients running the same probe push under one shared `task_id`
+(`ext_<probeName>`), so results are told apart by two ids:
+
+- **`agent_id`** — the client. Set it in the popup; if left blank the popup
+  auto-generates `browser-<random>`. **It lives in `chrome.storage.local`, which
+  is shared by every tab/window of one browser profile** — so the same
+  machine+profile pushes the *same* `agent_id` from all pages. Give each machine
+  a meaningful id (e.g. `dubai-pc1`) so they're easy to tell apart.
+- **`node_id`** — the page/tab. Generated per page load (`pg-<random>`) and sent
+  automatically, so different pages/tabs of the *same* `agent_id` are still
+  distinguishable.
+
+In the ProbeX **Results** page: pick the task, then the **Agent** dropdown filters
+to one client (chart + table); once a client is picked, a **Page** dropdown
+filters to one of its pages/tabs. (`agent_id` filtering works on existing data;
+the `node_id` / Page dropdown only populates after the extension is reloaded so
+new pushes carry it.)
+
 ## Test Audio
 
 The `audio/` directory contains sample WAV files for auto-test:
