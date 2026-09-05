@@ -21,6 +21,8 @@
 ### 交互计时指标（Interaction Timing）
 
 在 `guidex-interaction` 探针下上报，每轮自动拨测一条记录。指标按交互生命周期分组。
+各指标逐项分析见
+[docs/interaction-metrics-analysis.md](docs/interaction-metrics-analysis.md);
 迪拜↔利雅得链路与 `click_to_vd_ready_ms` 完整拆解见
 [docs/network-latency-analysis-riyadh.md](docs/network-latency-analysis-riyadh.md)。
 某字段为 `null` 表示对应事件从未发生（例如 ASR 失败时，下行的每一项都为 null），
