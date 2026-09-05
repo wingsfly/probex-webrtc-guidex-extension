@@ -62,10 +62,12 @@ toggleable in the legend).
 
 > Note: avatar audio and video ride on **separate PeerConnections**, so each
 > 500ms sub-sample only carries one side's inbound-rtp fields. The extension
-> merges fields across the 2s window (latest non-null) so both are reported —
-> otherwise one PC's fields (e.g. `video_jitter`/`video_fps`) go null.
-> `video_frames_decoded`/`_dropped` are per-interval deltas; `video_fps` is the
-> live decode rate from getStats.
+> merges fields across the 2s window so both are reported — point-in-time fields
+> (`video_jitter`/`video_fps`/`*_jb_delay_ms`) take the latest non-null value,
+> while the additive frame counts `video_frames_decoded`/`_dropped` are **summed**
+> across the window (true per-interval count). An audio-PC sub-sample leaves the
+> video fields null (not 0) so it can't clobber the video PC's values.
+> `video_fps` is the live decode rate from getStats.
 
 ## Architecture
 

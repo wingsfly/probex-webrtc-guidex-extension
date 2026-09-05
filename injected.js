@@ -464,10 +464,15 @@
     // sub-sample, which dropped the other PC's fields — that's why video_jitter/
     // fps/frames_decoded went null while video_jb_delay_ms, handled separately,
     // still reported.)
+    // Additive per-sub-sample counts (frame deltas) must be summed across the
+    // window; point-in-time fields (jitter, fps, jb delay …) take latest non-null.
+    const sumFields = new Set(['videoFramesDecoded', 'videoFramesDropped']);
     const aggregated = {};
     for (const s of subSamples) {
       for (const k in s) {
-        if (s[k] != null) aggregated[k] = s[k];
+        if (s[k] == null) continue;
+        if (sumFields.has(k)) aggregated[k] = (aggregated[k] || 0) + s[k];
+        else aggregated[k] = s[k];
       }
     }
     // A/V sync across PCs (positive = video lags behind audio)
@@ -789,12 +794,19 @@
     }
     now.uploadBps = sendDelta > 0 ? (bytesSentDelta * 8) / sendDelta : null;
 
-    // Video frames
-    let framesDecodedDelta = 0, framesDroppedDelta = 0, videoFps = null;
+    // Video frames. Only set the count fields when this sub-sample actually
+    // carries a video inbound-rtp with a computable delta — audio and video ride
+    // on separate PCs, so an audio-PC sub-sample has no inboundVideo. Leaving the
+    // fields null (not 0) lets flushSubSamples' "latest non-null" merge keep the
+    // video-PC delta instead of an audio-PC 0 clobbering it.
+    let framesDecodedDelta = null, framesDroppedDelta = null, videoFps = null;
     for (const r of inboundVideo) {
       if (prevMap) {
         const prev = prevMap.get(r.id);
-        if (prev) { framesDecodedDelta += (r.framesDecoded || 0) - (prev.framesDecoded || 0); framesDroppedDelta += (r.framesDropped || 0) - (prev.framesDropped || 0); }
+        if (prev) {
+          framesDecodedDelta = (framesDecodedDelta || 0) + ((r.framesDecoded || 0) - (prev.framesDecoded || 0));
+          framesDroppedDelta = (framesDroppedDelta || 0) + ((r.framesDropped || 0) - (prev.framesDropped || 0));
+        }
       }
       if (r.framesPerSecond != null) videoFps = r.framesPerSecond;
     }
