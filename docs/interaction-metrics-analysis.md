@@ -154,11 +154,13 @@ avg **2203ms**,96%(94/98)在 2000~2500;偶发离群(见过 7723ms,某轮 LLM/TTS
 - **`tts_total_duration_ms` 恒 null**:仅由 interact WS 的 `event_type:'tts_duration'` 累加,该事件已随协议改版消失。
 - **完成判定空等 ~8s**(更要紧):`ttsSegmentCount` 也只在该死事件自增 → 恒 0 → 完成条件 `ttsSegmentCount>0 && lipSegmentCount>=ttsSegmentCount` 永不触发 → 每轮空等到 25s 硬超时(数字人其实 ~14s 就说完)。
 
-### 5.3 修复
-| 修复 | 内容 |
+### 5.3 修复与教训
+| 项 | 结果 |
 |------|------|
-| **②** | 完成判定改为**基于正常的 `driver_status`(vmr=2)**:`finalAsrTime && avatarSpeakEnd && now − avatarSpeakEnd > 3000` 即退出(末段后静默 3s;新段到来时 avatarSpeakEnd 前移、窗口自动重置)。每轮省 ~8s |
-| **①(a)** | **移除** `tts_total_duration_ms`(冗余,avatar/play 时长已表征回复长度);连带清理死事件处理与孤立变量(ttsTotalDuration / ttsSegmentCount / lipSegmentCount),及 README/前端 label |
+| **①(a)** ✅ | **移除** `tts_total_duration_ms`(冗余,avatar/play 时长已表征回复长度);连带清理死事件处理与孤立变量(ttsTotalDuration / ttsSegmentCount / lipSegmentCount)及 README/前端 label |
+| **②** ❌ 已回退 | 曾尝试"末段 vmr=2 后静默 3s 即退出"来省 ~8s,**实测截断回复**:数字人回复是**多段 TTS、段间间隔 >3s**,3s 窗口在第一段(~1s)后就误判结束,avatar_dur 从 14s 塌到 1s。**结论:原来的 25s 固定等待不是浪费,而是覆盖多段回复 + 慢周期离群(见过 wait_play 7.7s → 回复在 tAudioEnd 后 ~22s 才结束)的必要安全余量。** 已回退为固定超时(15s 无 ASR / 25s 有 ASR / 60s 硬顶)。 |
+
+> 教训:`tts_duration` 段计数消失后,**没有可靠的"回复结束"信号**(driver_status 段间有大间隔,音频能量也会在段间跌零)。在拿到新协议的"结束"标志前,固定超时是正确选择,不应为省时间牺牲完整性。
 
 ---
 

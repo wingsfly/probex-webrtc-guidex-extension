@@ -1338,12 +1338,13 @@
     await new Promise(r => setTimeout(r, 100));
     sendVoiceDictationEnd();
 
-    // Wait for the avatar to finish speaking, then a 3s quiet window to catch any
-    // late additional segment. Completion is detected from driver_status (vmr=2)
-    // events: exit once 3s have passed since the last segment ended. (The old
-    // tts_duration-based segment count is gone with the protocol change, so we key
-    // off avatarSpeakEnd, which advances on every vmr=2 and thus self-resets the
-    // quiet window when a new segment arrives.)
+    // Wait for the avatar to finish, then push. We CANNOT reliably detect
+    // "done" from driver_status: the reply is multi-segment TTS with >3s gaps
+    // between segments, so any short quiet-window exits mid-reply and truncates
+    // it (measured: avatar_dur collapsed 14s→1s). The tts_duration segment count
+    // that used to bound this is gone with the protocol change, so we fall back
+    // to a fixed timeout sized to cover the full reply plus slow-cycle outliers
+    // (reply ends ~16s after tAudioEnd; a 7.7s wait_play spike was seen → 25s).
     await new Promise((resolve) => {
       let checks = 0;
       const check = setInterval(() => {
@@ -1351,10 +1352,6 @@
         const elapsed = checks * 100;
         if (!finalAsrTime && elapsed > 15000) { clearInterval(check); resolve(); return; }
         if (finalAsrTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
-        // Avatar spoke and has been quiet for 3s → done.
-        if (finalAsrTime && avatarSpeakEnd && performance.now() - avatarSpeakEnd > 3000) {
-          clearInterval(check); resolve(); return;
-        }
         if (elapsed > 60000) { clearInterval(check); resolve(); return; }
       }, 100);
     });
