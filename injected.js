@@ -1323,7 +1323,12 @@
     // ---- Timing: t_audio_end ----
     const tAudioEnd = performance.now();
 
-    await new Promise(r => setTimeout(r, 300));
+    // Small buffer so the last in-flight audio frames reach the server before we
+    // signal end-of-speech (status=2); the server only finalizes after this end
+    // signal. Live trace showed the old 300ms sat squarely on the critical path
+    // and inflated audio_end_to_final_asr_ms by ~300ms; one-way latency is ~50ms,
+    // so 100ms keeps a 2x margin against tail-word truncation.
+    await new Promise(r => setTimeout(r, 100));
     sendVoiceDictationEnd();
 
     // Wait for avatar to finish ALL TTS segments or timeout.
