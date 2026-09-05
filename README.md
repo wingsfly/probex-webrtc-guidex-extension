@@ -50,8 +50,8 @@ toggleable in the legend).
 | `audio_jitter` | Audio RTP interarrival jitter (ms) | inbound-rtp(audio) `jitter`×1000 |
 | `video_jitter` | Video RTP interarrival jitter (ms) | inbound-rtp(video) `jitter`×1000 |
 | `video_fps` | Video frame rate (fps) | inbound-rtp(video) `framesPerSecond` |
-| `video_frames_decoded` *hidden* | Decoded frames in interval | inbound-rtp(video) `framesDecoded` delta |
-| `video_frames_dropped` *hidden* | Dropped frames in interval | inbound-rtp(video) `framesDropped` delta |
+| `video_frames_decoded` *hidden* | Frames decoded per push interval (≈ `video_fps` × interval, e.g. ~50 at 25fps / 2s) | inbound-rtp(video) `framesDecoded` delta, summed over the window |
+| `video_frames_dropped` *hidden* | Frames dropped per push interval (0 when healthy) | inbound-rtp(video) `framesDropped` delta, summed over the window |
 | `audio_jb_delay_ms` | Audio jitter-buffer playout delay (ms) | (`jitterBufferDelay` delta / `jitterBufferEmittedCount` delta)×1000 |
 | `video_jb_delay_ms` | Video jitter-buffer playout delay (ms) | same, video inbound-rtp |
 | `av_sync_diff_ms` | A/V sync: latest videoJB − audioJB (ms) | >0 = video lags audio |
