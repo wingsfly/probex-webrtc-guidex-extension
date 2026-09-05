@@ -21,7 +21,9 @@ Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browse
 ### Interaction Timing Metrics
 
 Reported under the `guidex-interaction` probe, one row per auto-test cycle.
-Metrics are grouped along the interaction lifecycle. A field is `null` when its
+Metrics are grouped along the interaction lifecycle. See
+[docs/network-latency-analysis-riyadh.md](docs/network-latency-analysis-riyadh.md)
+for a full Dubai↔Riyadh link + `click_to_vd_ready_ms` decomposition study. A field is `null` when its
 event never fired (e.g. every downlink metric is null when ASR fails), which is
 the primary failure signal.
 
