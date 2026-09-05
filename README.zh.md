@@ -77,7 +77,6 @@
 | 短名 | 字段 | 公式 | 含义 |
 |------|------|------|------|
 | Play Dur | `actual_audio_duration_ms` | `actualAudioEnd − actualAudioStart` | 客户端回复音频播放时长（RMS） |
-| TTS Len | `tts_total_duration_ms` | Σ 各段 | TTS 合成音频总时长（原始，约为播放速度的 ~1.5×） |
 | Avatar Dur | `avatar_speak_duration_ms` | `avatarSpeakEnd − avatarSpeakStart` | 数字人说话总墙钟时长 |
 | Lip Move | `lip_move_ms` | Σ(`vmr` 1→2) | 嘴真正在动的累计时长 |
 | Lip Sync | `lip_sync_diff_ms` | `actual_audio_duration − lip_move` | >0 = 音频播放时长长于唇动时长 |

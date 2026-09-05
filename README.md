@@ -78,7 +78,6 @@ the primary failure signal.
 | Short Name | Field | Formula | Description |
 |-----------|-------|---------|-------------|
 | Play Dur | `actual_audio_duration_ms` | `actualAudioEnd − actualAudioStart` | Client-side reply-audio playback duration (RMS) |
-| TTS Len | `tts_total_duration_ms` | Σ segments | Raw TTS synthesized length (~1.5× playback speed) |
 | Avatar Dur | `avatar_speak_duration_ms` | `avatarSpeakEnd − avatarSpeakStart` | Total avatar speaking wall-clock time |
 | Lip Move | `lip_move_ms` | Σ(`vmr` 1→2) | Cumulative time the mouth is actually moving |
 | Lip Sync | `lip_sync_diff_ms` | `actual_audio_duration − lip_move` | >0 = audio plays longer than the mouth moves |

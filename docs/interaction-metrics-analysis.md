@@ -136,6 +136,31 @@ avg **2203ms**,96%(94/98)在 2000~2500;偶发离群(见过 7723ms,某轮 LLM/TTS
 
 ---
 
-## 5. 待分析
-- `actual_audio_duration_ms` / `tts_total_duration_ms`(播放时长 vs 合成时长)
-- `tts_to_avatar_speak_ms` / 唇形同步系列(lip_move / lip_sync_diff / vmr_to_actual_audio)
+## 5. 播放/唇形时长系列(actual_audio_duration / avatar_speak / lip_move / lip_sync_diff)
+
+### 5.1 数据(20.4,最近 2h)
+| 指标 | 值 | 说明 |
+|------|----|------|
+| `actual_audio_duration_ms`(Play Dur) | ~13364ms | 回复音频播放时长 |
+| `avatar_speak_duration_ms`(Avatar Dur) | ~13755ms | 数字人说话墙钟 |
+| `lip_move_ms`(Lip Move) | ~13178ms | 累计唇动 |
+| `lip_sync_diff_ms`(Lip Sync) | ~185ms | 音频比唇动长 185ms |
+| `tts_total_duration_ms`(TTS Len) | **null(坏死)** | 见下 |
+
+- 回复 ~13.4s(对固定问句生成 ~13s 产品介绍,内容长度非性能问题),play/avatar/lip 三者一致。
+- **唇音同步良好**:`lip_sync_diff ≈ 185ms`(占 13s 的 1.4%),结尾自然收尾,无错位。
+
+### 5.2 两个协议漂移引发的问题(`tts_duration` 事件消失)
+- **`tts_total_duration_ms` 恒 null**:仅由 interact WS 的 `event_type:'tts_duration'` 累加,该事件已随协议改版消失。
+- **完成判定空等 ~8s**(更要紧):`ttsSegmentCount` 也只在该死事件自增 → 恒 0 → 完成条件 `ttsSegmentCount>0 && lipSegmentCount>=ttsSegmentCount` 永不触发 → 每轮空等到 25s 硬超时(数字人其实 ~14s 就说完)。
+
+### 5.3 修复
+| 修复 | 内容 |
+|------|------|
+| **②** | 完成判定改为**基于正常的 `driver_status`(vmr=2)**:`finalAsrTime && avatarSpeakEnd && now − avatarSpeakEnd > 3000` 即退出(末段后静默 3s;新段到来时 avatarSpeakEnd 前移、窗口自动重置)。每轮省 ~8s |
+| **①(a)** | **移除** `tts_total_duration_ms`(冗余,avatar/play 时长已表征回复长度);连带清理死事件处理与孤立变量(ttsTotalDuration / ttsSegmentCount / lipSegmentCount),及 README/前端 label |
+
+---
+
+## 6. 待分析
+- `tts_to_avatar_speak_ms`(TTS→动嘴)/ `vmr_to_actual_audio_ms`(唇音同步细节)

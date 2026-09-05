@@ -1033,7 +1033,6 @@
               { name: 'audio_end_to_tts_ms', type: 'number', unit: 'ms', description: 'User done speaking → first TTS synthesis event', chartable: true },
               { name: 'tts_to_avatar_speak_ms', type: 'number', unit: 'ms', description: 'TTS synthesis → avatar starts speaking', chartable: true },
               { name: 'avatar_speak_duration_ms', type: 'number', unit: 'ms', description: 'Avatar speaking duration (all segments)', chartable: true },
-              { name: 'tts_total_duration_ms', type: 'number', unit: 'ms', description: 'Total TTS audio duration (sum of segments)', chartable: true },
               { name: 'lip_move_ms', type: 'number', unit: 'ms', description: 'Total mouth-moving time (sum of vmr_status 1→2)', chartable: true },
               { name: 'lip_sync_diff_ms', type: 'number', unit: 'ms', description: 'Client audio playback minus lip-move time (>0 = audio plays longer than mouth moves)', chartable: true },
               { name: 'audio_end_to_playback_ms', type: 'number', unit: 'ms', description: 'User done speaking → client hears reply audio', chartable: true },
@@ -1114,15 +1113,12 @@
     let firstAsrTime = 0;
     let finalAsrText = '';
     let finalAsrTime = 0;
-    let ttsStartTime = 0;       // first tts_duration event after ASR
+    let ttsStartTime = 0;       // first TTS drive event after ASR (autoReport textChat)
     let avatarSpeakStart = 0;   // first vmr_status=1 (avatar mouth starts moving)
-    let avatarSpeakEnd = 0;     // last vmr_status=2 (avatar finished all segments)
-    let ttsTotalDuration = 0;   // sum of all tts_duration values in this cycle
+    let avatarSpeakEnd = 0;     // last vmr_status=2 (avatar finished the latest segment)
     let lipMoveMs = 0;          // total time mouth is moving (sum of vmr_status 0/1→2 segments)
     let lastLipStart = 0;       // timestamp of first vmr=0 or vmr=1 in current segment
     let firstVmr1Time = 0;      // first vmr_status=1 (actual mouth movement, for tts_to_avatar_speak)
-    let ttsSegmentCount = 0;    // number of tts_duration events received
-    let lipSegmentCount = 0;    // number of vmr_status=2 events (completed lip segments)
     let actualAudioStart = 0;   // client-side: first moment audio energy detected
     let actualAudioEnd = 0;     // client-side: last moment audio energy dropped to silence
     let audioEnergyMonitor = null; // cleanup handle for energy detection
@@ -1246,11 +1242,6 @@
           const avatar = msg.payload?.avatar;
           if (!avatar || !finalAsrTime) return; // only track events after ASR ends
 
-          if (avatar.event_type === 'tts_duration') {
-            if (!ttsStartTime) ttsStartTime = performance.now();
-            ttsTotalDuration += (avatar.tts_duration || 0);
-            ttsSegmentCount++;
-          }
           if (avatar.event_type === 'driver_status') {
             // vmr_status=0: driver starts processing (always present)
             // vmr_status=1: avatar mouth starts moving (may be absent for short segments)
@@ -1263,7 +1254,6 @@
             }
             if (avatar.vmr_status === 2) {
               avatarSpeakEnd = performance.now();
-              lipSegmentCount++;
               if (lastLipStart) { lipMoveMs += (avatarSpeakEnd - lastLipStart); lastLipStart = 0; }
             }
           }
@@ -1348,26 +1338,22 @@
     await new Promise(r => setTimeout(r, 100));
     sendVoiceDictationEnd();
 
-    // Wait for avatar to finish ALL TTS segments or timeout.
-    // Done: wait for all TTS segments to have matching vmr_status:2, then wait 3s quiet
-    // to catch any late-arriving additional segments.
+    // Wait for the avatar to finish speaking, then a 3s quiet window to catch any
+    // late additional segment. Completion is detected from driver_status (vmr=2)
+    // events: exit once 3s have passed since the last segment ended. (The old
+    // tts_duration-based segment count is gone with the protocol change, so we key
+    // off avatarSpeakEnd, which advances on every vmr=2 and thus self-resets the
+    // quiet window when a new segment arrives.)
     await new Promise((resolve) => {
       let checks = 0;
-      let allMatchedAt = 0; // timestamp when lip count first matched tts count
       const check = setInterval(() => {
         checks++;
         const elapsed = checks * 100;
         if (!finalAsrTime && elapsed > 15000) { clearInterval(check); resolve(); return; }
         if (finalAsrTime && elapsed > 25000) { clearInterval(check); resolve(); return; }
-        // Check if all known segments completed
-        if (ttsSegmentCount > 0 && lipSegmentCount >= ttsSegmentCount) {
-          if (!allMatchedAt) allMatchedAt = performance.now();
-          // Wait 3s after match to catch late additional segments
-          if (performance.now() - allMatchedAt > 3000) {
-            clearInterval(check); resolve(); return;
-          }
-        } else {
-          allMatchedAt = 0; // reset if new segment arrived
+        // Avatar spoke and has been quiet for 3s → done.
+        if (finalAsrTime && avatarSpeakEnd && performance.now() - avatarSpeakEnd > 3000) {
+          clearInterval(check); resolve(); return;
         }
         if (elapsed > 60000) { clearInterval(check); resolve(); return; }
       }, 100);
@@ -1389,7 +1375,6 @@
       audio_end_to_tts_ms: ttsStartTime ? Math.round(ttsStartTime - tAudioEnd) : null,
       tts_to_avatar_speak_ms: (ttsStartTime && firstVmr1Time) ? Math.round(firstVmr1Time - ttsStartTime) : null,
       avatar_speak_duration_ms: (avatarSpeakStart && avatarSpeakEnd) ? Math.round(avatarSpeakEnd - avatarSpeakStart) : null,
-      tts_total_duration_ms: ttsTotalDuration || null,
       lip_move_ms: lipMoveMs ? Math.round(lipMoveMs) : null,
       lip_sync_diff_ms: (actualAudioStart && actualAudioEnd && lipMoveMs) ? Math.round((actualAudioEnd - actualAudioStart) - lipMoveMs) : null,
       audio_end_to_playback_ms: (actualAudioStart && tAudioEnd) ? Math.round(actualAudioStart - tAudioEnd) : null,
