@@ -60,10 +60,12 @@ toggleable in the legend).
 | `quality_limitation` | Encoder quality-limitation reason | outbound-rtp(video) `qualityLimitationReason` (cpu/bandwidth/none) |
 | `page_url` | Source page URL | `location.href` |
 
-> Note: `video_jitter` / `video_fps` / `video_frames_decoded` are derived from
-> *decoded frames* — if the avatar stream carries no decoded video frames
-> (`framesDecoded` stays 0, e.g. canvas/audio-driven rendering), these read as
-> null/0 while `video_jb_delay_ms` may still report (the track exists).
+> Note: avatar audio and video ride on **separate PeerConnections**, so each
+> 500ms sub-sample only carries one side's inbound-rtp fields. The extension
+> merges fields across the 2s window (latest non-null) so both are reported —
+> otherwise one PC's fields (e.g. `video_jitter`/`video_fps`) go null.
+> `video_frames_decoded`/`_dropped` are per-interval deltas; `video_fps` is the
+> live decode rate from getStats.
 
 ## Architecture
 
