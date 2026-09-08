@@ -1093,6 +1093,8 @@
   let autoTestSelector = '';
   let autoTestInterval = 30000;
   let autoTestCycleCount = 0;
+  let vdFailStreak = 0;              // consecutive "voiceDictation not ready" failures
+  const VD_FAIL_RELOAD = 3;          // reload the page to self-heal after this many in a row
 
   async function autoTestCycle() {
     if (!autoTestRunning) return;
@@ -1314,14 +1316,27 @@
     const tVdReady = vdFirstSendTime || vdOpenTime || performance.now();
 
     if (!vdReady) {
-      console.warn('[ProbeX] Auto-test cycle #' + cycleNum + ': VD not ready, skipping');
+      vdFailStreak++;
+      console.warn('[ProbeX] Auto-test cycle #' + cycleNum + ': VD not ready, skipping (streak=' + vdFailStreak + ')');
       await pushInteractionResult({
         success: false, cycle: cycleNum, page_url: location.href,
         audio_duration_ms: Math.round(audioBuffer.duration * 1000),
         click_to_vd_ready_ms: null,
       });
+      // Self-heal: on a weak link the GuideX app can get stuck in the "listening"
+      // state — the trigger no longer opens a new voiceDictation session, so every
+      // cycle bails here and never recovers on its own. After VD_FAIL_RELOAD
+      // consecutive failures, reload the page to reset that state. Auto-test
+      // resumes automatically (selector/audio/interval persist in chrome.storage
+      // and content-script restarts it on load).
+      if (vdFailStreak >= VD_FAIL_RELOAD) {
+        console.warn('[ProbeX] ' + vdFailStreak + ' consecutive VD-not-ready failures → reloading page to recover');
+        vdFailStreak = 0;
+        location.reload();
+      }
       return;
     }
+    vdFailStreak = 0;
 
     // Setup listeners before sending audio
     setupAsrListener(voiceDictationWs);
