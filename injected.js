@@ -1119,7 +1119,7 @@
     let firstAsrTime = 0;
     let finalAsrText = '';
     let finalAsrTime = 0;
-    let ttsStartTime = 0;       // first TTS drive event after ASR (autoReport textChat)
+    let ttsStartTime = 0;       // first TTS drive event after ASR (autoReport isAudioDriver)
     let avatarSpeakStart = 0;   // first vmr_status=1 (avatar mouth starts moving)
     let avatarSpeakEnd = 0;     // last vmr_status=2 (avatar finished the latest segment)
     let lipMoveMs = 0;          // total time mouth is moving (sum of vmr_status 0/1→2 segments)
@@ -1268,15 +1268,19 @@
       interactWs.addEventListener('message', interactListener);
 
       // autoReport WS carries the TTS audio in the new GuideX protocol (the old
-      // interact "tts_duration" event is gone). The first textChat message with
-      // isAudioDriver after ASR marks TTS start.
+      // interact "tts_duration" event is gone). TTS start = first message after ASR
+      // whose payload carries isAudioDriver truthy. Match on isAudioDriver alone,
+      // NOT the action name: GuideX moved the signal from action "textChat"
+      // (2026-09: now isAudioDriver:0) to action "textToSpeech" (isAudioDriver:1),
+      // which silently nulled audio_end_to_tts_ms / tts_to_avatar_speak_ms. Keying
+      // off isAudioDriver survives such action renames.
       const autoReportWs = window.__probexWsList.find(ws => ws.url?.includes('/autoReport') && ws.readyState === WebSocket.OPEN);
       if (autoReportWs) {
         autoReportListener = (ev) => {
           if (typeof ev.data !== 'string') return;
           try {
             const m = JSON.parse(ev.data);
-            if (finalAsrTime && !ttsStartTime && m?.header?.action === 'textChat' && m?.payload?.data?.isAudioDriver) {
+            if (finalAsrTime && !ttsStartTime && m?.payload?.data?.isAudioDriver) {
               ttsStartTime = performance.now();
             }
           } catch (e) {}
