@@ -5,6 +5,7 @@ const $ = (id) => document.getElementById(id);
 
 const DEFAULT_CONFIG = {
   hubUrl: 'http://localhost:8080',
+  ingestToken: '',
   probeName: 'webrtc-browser',
   agentId: '',
   collectInterval: 2000,
@@ -22,6 +23,7 @@ async function loadConfig() {
 
 function updateConfigForm(config) {
   $('hubUrl').value = config.hubUrl || '';
+  $('ingestToken').value = config.ingestToken || '';
   $('probeName').value = config.probeName || '';
   $('agentId').value = config.agentId || '';
   $('collectInterval').value = (config.collectInterval || 2000) / 1000;
@@ -98,6 +100,7 @@ function setMetric(id, value, unit, decimals, thresholds) {
 function onSave() {
   const newConfig = {
     hubUrl: $('hubUrl').value.trim().replace(/\/+$/, ''),
+    ingestToken: $('ingestToken').value.trim(),
     probeName: $('probeName').value.trim() || 'webrtc-browser',
     agentId: $('agentId').value.trim(),
     collectInterval: Math.max(1, Math.min(10, parseInt($('collectInterval').value) || 2)) * 1000,

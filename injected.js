@@ -515,6 +515,7 @@
 
   // --- Config (injected via postMessage from content-script) ---
   let hubUrl = 'http://localhost:8080';
+  let ingestToken = ''; // sent as X-Ingest-Token so authed hubs (e.g. yghk) accept pushes
   let probeName = 'webrtc-browser';
   let agentId = '';
   // Per-page-load id: agentId lives in chrome.storage (shared by all tabs/pages of
@@ -546,6 +547,7 @@
     if (event.data?.type === 'probex-config') {
       const c = event.data;
       if (c.hubUrl) hubUrl = c.hubUrl;
+      if (c.ingestToken !== undefined) ingestToken = c.ingestToken;
       if (c.probeName) probeName = c.probeName;
       if (c.agentId) agentId = c.agentId;
       if (c.collectInterval) {
@@ -715,24 +717,33 @@
         id,
         url,
         method: options.method || 'GET',
+        headers: options.headers || null,
         body: options.body || null,
       }, '*');
     });
   }
 
+  // Headers for hub calls; adds the ingest token when configured (authed hubs).
+  function hubHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    if (ingestToken) h['X-Ingest-Token'] = ingestToken;
+    return h;
+  }
+
   // Unified fetch: try extension proxy first (no mixed content), fallback to direct
   async function probexFetch(url, options) {
+    const opts = { ...options, headers: hubHeaders() };
     // Try proxy through content-script → background (bypasses mixed content)
-    const proxyResult = await proxyFetch(url, options);
+    const proxyResult = await proxyFetch(url, opts);
     // Only trust proxy if it got a real HTTP response (status > 0)
     if (proxyResult && proxyResult.status > 0) {
       return { ok: proxyResult.ok, status: proxyResult.status };
     }
     // Fallback: direct fetch (works for localhost, same-protocol, etc.)
     const resp = await fetch(url, {
-      method: options.method || 'GET',
-      headers: { 'Content-Type': 'application/json' },
-      body: options.body || null,
+      method: opts.method || 'GET',
+      headers: opts.headers,
+      body: opts.body || null,
     });
     return { ok: resp.ok, status: resp.status };
   }

@@ -14,6 +14,7 @@
         window.postMessage({
           type: 'probex-config',
           hubUrl: c.hubUrl || 'http://localhost:8080',
+          ingestToken: c.ingestToken || '',
           probeName: c.probeName || 'webrtc-browser',
           agentId: c.agentId || '',
           collectInterval: c.collectInterval || 2000,
@@ -106,7 +107,7 @@
     if (event.source !== window) return;
     if (event.data?.type !== 'probex-fetch-request') return;
 
-    const { id, url, method, body } = event.data;
+    const { id, url, method, headers, body } = event.data;
 
     try {
       // Send to background SW which does the actual fetch
@@ -114,6 +115,7 @@
         type: 'proxy-fetch',
         url,
         method,
+        headers,
         body,
       });
       window.postMessage({

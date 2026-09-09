@@ -23,7 +23,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'proxy-fetch') {
     fetch(msg.url, {
       method: msg.method || 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: msg.headers || { 'Content-Type': 'application/json' },
       body: msg.body || null,
     })
       .then(async (resp) => {
