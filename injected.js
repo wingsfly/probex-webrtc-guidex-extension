@@ -152,6 +152,7 @@
     if (this === voiceDictationWs || (this.url && this.url.includes('voiceDictation'))) {
       vdSendCount++;
       if (!vdFirstSendTime) vdFirstSendTime = performance.now();
+      passiveOnVdSend(data);   // passive capture of a real user's own audio frames
       if (vdSendCount <= 10) {
         if (data instanceof ArrayBuffer) {
           const hex = Array.from(new Uint8Array(data.slice(0, 32))).map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -165,6 +166,173 @@
     }
     return origWsSend.call(this, data);
   };
+
+  // ====== Passive real-user interaction capture ======
+  // When auto-test is OFF, observe a REAL user's own interaction — their audio
+  // frames on the voiceDictation WS plus the server's ASR / TTS / avatar events —
+  // and report the same downlink metrics without injecting synthetic audio. Only
+  // click-anchored metrics (click_to_vd_*, total_interaction) are omitted, since
+  // there is no plugin click to anchor them to. Tagged interaction_mode:'passive'.
+  let passiveActive = false;
+  let passiveState = null;
+  let passiveQuietTimer = null;
+  let passiveHardTimer = null;
+  let passiveScanTimer = null;
+
+  function passiveReset() {
+    passiveActive = false;
+    if (passiveState && passiveState.energyStop) { try { passiveState.energyStop(); } catch (e) {} }
+    passiveState = null;
+    if (passiveQuietTimer) { clearTimeout(passiveQuietTimer); passiveQuietTimer = null; }
+    if (passiveHardTimer) { clearTimeout(passiveHardTimer); passiveHardTimer = null; }
+  }
+
+  function passiveStart() {
+    passiveActive = true;
+    const now = performance.now();
+    passiveState = {
+      tAudioStart: now, tAudioEnd: 0, lastAudioAt: now,
+      firstAsrTime: 0, firstAsrText: null, finalAsrTime: 0, finalAsrText: '',
+      ttsStartTime: 0, firstVmr1Time: 0, avatarSpeakStart: 0, avatarSpeakEnd: 0,
+      lipMoveMs: 0, lastLipStart: 0, actualAudioStart: 0, actualAudioEnd: 0, energyStop: null,
+    };
+    console.log('[ProbeX] passive: user interaction started (audio detected)');
+    passiveHardTimer = setTimeout(() => { if (passiveActive) passiveComplete('timeout'); }, 45000);
+  }
+
+  // Fed from the voiceDictation send hook: the user's own audio frames (status:1)
+  // and end-of-speech (status:2). Only active when auto-test is off.
+  function passiveOnVdSend(data) {
+    if (autoTestRunning || !enabled || typeof data !== 'string' || data.indexOf('"status"') < 0) return;
+    let status; try { status = JSON.parse(data).status; } catch (e) { return; }
+    if (status === 1) {
+      if (!passiveActive) passiveStart();
+      else if (passiveState && !passiveState.tAudioEnd) passiveState.lastAudioAt = performance.now();
+    } else if (status === 2 && passiveActive && passiveState && !passiveState.tAudioEnd) {
+      passiveState.tAudioEnd = performance.now();
+    }
+  }
+
+  function passiveAttach(ws) {
+    if (!ws || ws.__passiveHooked) return;
+    const url = ws.url || '';
+    if (!/voiceDictation|autoReport|\/v1\/interact/.test(url)) return;
+    ws.__passiveHooked = true;
+    ws.addEventListener('message', (ev) => {
+      if (autoTestRunning || !passiveActive || !passiveState || typeof ev.data !== 'string') return;
+      if (url.includes('voiceDictation')) passiveOnAsr(ev.data);
+      else if (url.includes('/autoReport')) passiveOnTts(ev.data);
+      else passiveOnAvatar(ev.data);
+    });
+  }
+
+  function passiveOnAsr(raw) {
+    let msg; try { msg = JSON.parse(raw); } catch (e) { return; }
+    let words = '', isFinal = false;
+    if (msg?.header?.action === 'h5VoiceInput' && msg?.payload?.data?.data) {
+      let inner; try { inner = JSON.parse(msg.payload.data.data); } catch (e) { return; }
+      if (inner.code !== 0 || !inner.data) return;
+      words = (inner.data.sourceText || inner.data.subtitleText || '').trim();
+      isFinal = msg.header.status === 2;
+    } else if (msg.code === 0 && msg.data?.result) {
+      words = (msg.data.result.ws || []).flatMap(w => (w.cw || []).map(c => c.w)).join('').trim();
+      isFinal = msg.data.result.ls === true && msg.data.status === 2;
+    } else return;
+    const s = passiveState;
+    if (words && !s.firstAsrTime) { s.firstAsrTime = performance.now(); s.firstAsrText = words; }
+    if (isFinal) {
+      s.finalAsrTime = performance.now();
+      s.finalAsrText = words || s.firstAsrText || '';
+      if (!s.tAudioEnd) s.tAudioEnd = s.lastAudioAt || performance.now();
+      passiveSetupEnergy();
+    }
+  }
+
+  function passiveOnTts(raw) {
+    let m; try { m = JSON.parse(raw); } catch (e) { return; }
+    if (passiveState.finalAsrTime && !passiveState.ttsStartTime && m?.payload?.data?.isAudioDriver) {
+      passiveState.ttsStartTime = performance.now();
+    }
+  }
+
+  function passiveOnAvatar(raw) {
+    let msg; try { msg = JSON.parse(raw); } catch (e) { return; }
+    const avatar = msg.payload?.avatar;
+    if (!avatar || !passiveState.finalAsrTime || avatar.event_type !== 'driver_status') return;
+    const s = passiveState;
+    if (avatar.vmr_status === 0 || avatar.vmr_status === 1) {
+      if (!s.avatarSpeakStart) s.avatarSpeakStart = performance.now();
+      if (!s.lastLipStart) s.lastLipStart = performance.now();
+      if (avatar.vmr_status === 1 && !s.firstVmr1Time) s.firstVmr1Time = performance.now();
+    }
+    if (avatar.vmr_status === 2) {
+      s.avatarSpeakEnd = performance.now();
+      if (s.lastLipStart) { s.lipMoveMs += (s.avatarSpeakEnd - s.lastLipStart); s.lastLipStart = 0; }
+      if (passiveQuietTimer) clearTimeout(passiveQuietTimer);
+      passiveQuietTimer = setTimeout(() => { if (passiveActive) passiveComplete('done'); }, 3000);
+    }
+  }
+
+  function passiveSetupEnergy() {
+    const s = passiveState;
+    if (!s || s.energyStop) return;
+    let track = null;
+    for (const [, entry] of connections) {
+      const pc = entry.pc; if (!pc.getReceivers) continue;
+      for (const r of pc.getReceivers()) { if (r.track?.kind === 'audio' && r.track.readyState === 'live') { track = r.track; break; } }
+      if (track) break;
+    }
+    if (!track) return;
+    try {
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(new MediaStream([track]));
+      const an = ctx.createAnalyser(); an.fftSize = 256; an.smoothingTimeConstant = 0.3;
+      src.connect(an);
+      const bufA = new Uint8Array(an.frequencyBinCount); let was = false;
+      const iv = setInterval(() => {
+        an.getByteFrequencyData(bufA);
+        let sum = 0; for (let i = 0; i < bufA.length; i++) sum += bufA[i] * bufA[i];
+        const rms = Math.sqrt(sum / bufA.length); const playing = rms > 10;
+        if (playing && !was) { if (!s.actualAudioStart && s.finalAsrTime) s.actualAudioStart = performance.now(); was = true; }
+        else if (!playing && was) { s.actualAudioEnd = performance.now(); was = false; }
+      }, 20);
+      s.energyStop = () => { clearInterval(iv); try { src.disconnect(); ctx.close(); } catch (e) {} };
+    } catch (e) {}
+  }
+
+  function passiveComplete(reason) {
+    const s = passiveState;
+    if (!s) { passiveReset(); return; }
+    const asrSuccess = !!s.firstAsrText;
+    const metrics = {
+      success: asrSuccess,
+      interaction_mode: 'passive',
+      asr_text: s.finalAsrText || s.firstAsrText || '',
+      page_url: location.href,
+      audio_duration_ms: (s.tAudioEnd && s.tAudioStart) ? Math.round(s.tAudioEnd - s.tAudioStart) : null,
+      audio_start_to_first_asr_ms: s.firstAsrTime ? Math.round(s.firstAsrTime - s.tAudioStart) : null,
+      audio_end_to_final_asr_ms: (s.finalAsrTime && s.tAudioEnd) ? Math.round(s.finalAsrTime - s.tAudioEnd) : null,
+      audio_end_to_tts_ms: (s.ttsStartTime && s.tAudioEnd) ? Math.round(s.ttsStartTime - s.tAudioEnd) : null,
+      tts_to_avatar_speak_ms: (s.ttsStartTime && s.firstVmr1Time) ? Math.round(s.firstVmr1Time - s.ttsStartTime) : null,
+      avatar_speak_duration_ms: (s.avatarSpeakStart && s.avatarSpeakEnd) ? Math.round(s.avatarSpeakEnd - s.avatarSpeakStart) : null,
+      lip_move_ms: s.lipMoveMs ? Math.round(s.lipMoveMs) : null,
+      lip_sync_diff_ms: (s.actualAudioStart && s.actualAudioEnd && s.lipMoveMs) ? Math.round((s.actualAudioEnd - s.actualAudioStart) - s.lipMoveMs) : null,
+      audio_end_to_playback_ms: (s.actualAudioStart && s.tAudioEnd) ? Math.round(s.actualAudioStart - s.tAudioEnd) : null,
+      actual_audio_duration_ms: (s.actualAudioStart && s.actualAudioEnd) ? Math.round(s.actualAudioEnd - s.actualAudioStart) : null,
+      vmr_to_actual_audio_ms: (s.firstVmr1Time && s.actualAudioStart) ? Math.round(s.actualAudioStart - s.firstVmr1Time) : null,
+    };
+    console.log('[ProbeX] passive interaction complete (' + reason + '): ' + (asrSuccess ? 'ASR="' + metrics.asr_text + '"' : 'no ASR'));
+    passiveReset();
+    pushInteractionResult(metrics);
+  }
+
+  function startPassiveScanLoop() {
+    if (passiveScanTimer) return;
+    passiveScanTimer = setInterval(() => {
+      if (!enabled) return;
+      (window.__probexWsList || []).forEach(passiveAttach);
+    }, 1000);
+  }
 
   // ====== Track SpeechRecognition (may capture mic without getUserMedia) ======
   const OrigSpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -393,6 +561,7 @@
         if (enabled) { startCollectLoop(); startPushLoop(); }
         else { stopAll(); }
       }
+      if (enabled) startPassiveScanLoop();  // passive real-user capture runs whenever enabled
       // Re-register if probe name changed
       registered = false;
       return;
@@ -1028,6 +1197,7 @@
             standard_fields: ['latency_ms'],
             extra_fields: [
               { name: 'success', type: 'boolean', description: 'Whether ASR recognized speech', chartable: false },
+              { name: 'interaction_mode', type: 'string', description: 'auto-test (default) or passive (real user)' },
               { name: 'asr_text', type: 'string', description: 'Recognized text from ASR' },
               { name: 'audio_duration_ms', type: 'number', unit: 'ms', description: 'Duration of injected test audio', chartable: true },
               { name: 'audio_inject_ms', type: 'number', unit: 'ms', description: 'Actual audio injection window (tAudioEnd - tAudioStart); should ≈ audio_duration_ms', chartable: true, default_hidden: true },
@@ -1486,6 +1656,8 @@
     if (collectTimer) { clearInterval(collectTimer); collectTimer = null; }
     if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
     if (pushTimer) { clearInterval(pushTimer); pushTimer = null; }
+    if (passiveScanTimer) { clearInterval(passiveScanTimer); passiveScanTimer = null; }
+    passiveReset();
   }
 
   // ====== Diagnostic (call window.__probexDiag() in console during active call) ======
