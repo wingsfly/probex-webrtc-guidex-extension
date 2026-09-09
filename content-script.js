@@ -20,6 +20,7 @@
           collectInterval: c.collectInterval || 2000,
           pushInterval: c.pushInterval || 5000,
           enabled: c.enabled !== false,
+          guidexProfile: c.guidexProfile || 'auto',
         }, '*');
       });
     } catch (e) { /* extension context gone */ }

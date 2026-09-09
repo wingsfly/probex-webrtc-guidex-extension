@@ -11,6 +11,7 @@ const DEFAULT_CONFIG = {
   collectInterval: 2000,
   pushInterval: 5000,
   enabled: true,
+  guidexProfile: 'auto',
 };
 
 async function loadConfig() {
@@ -29,6 +30,7 @@ function updateConfigForm(config) {
   $('collectInterval').value = (config.collectInterval || 2000) / 1000;
   $('pushInterval').value = (config.pushInterval || 5000) / 1000;
   $('enabled').checked = config.enabled !== false;
+  $('guidexProfile').value = config.guidexProfile || 'auto';
 }
 
 // Query injected.js in the active tab for live stats
@@ -52,6 +54,12 @@ async function queryActiveTab() {
 
 function updateStatus(config, liveStats) {
   const badge = $('statusBadge');
+  const runtime = liveStats?.runtime;
+  $('runtimeStatus').textContent = config.guidexProfile === 'legacy'
+    ? 'Legacy probe: guidex-interaction'
+    : runtime?.connections
+      ? `Runtime v4: ${runtime.ready ? 'registered' : 'connecting'} | active turns: ${runtime.activeTurns} | completed: ${runtime.completed}`
+      : 'No Runtime connection observed. Reload GuideX after extension update. Legacy pages remain supported in Auto mode.';
 
   if (!config.enabled) {
     badge.textContent = 'Disabled';
@@ -106,6 +114,7 @@ function onSave() {
     collectInterval: Math.max(1, Math.min(10, parseInt($('collectInterval').value) || 2)) * 1000,
     pushInterval: Math.max(3, Math.min(30, parseInt($('pushInterval').value) || 5)) * 1000,
     enabled: $('enabled').checked,
+    guidexProfile: $('guidexProfile').value,
   };
   if (!newConfig.agentId) {
     newConfig.agentId = `browser-${Math.random().toString(36).substring(2, 8)}`;
@@ -146,12 +155,13 @@ let testRunning = false;
 
 async function onToggleTest() {
   const selector = $('capturedSelector').value;
+  const existing = await loadAutoTestConfig();
   if (!testRunning) {
     if (!selector) { alert('Please capture a button first'); return; }
     const interval = parseInt($('testInterval').value) || 30;
     testRunning = true;
     chrome.storage.local.set({
-      autoTestConfig: { running: true, selector, interval },
+      autoTestConfig: { ...existing, running: true, selector, interval },
     });
     $('startTestBtn').textContent = 'Stop';
     $('startTestBtn').className = 'btn-test running';
@@ -159,7 +169,7 @@ async function onToggleTest() {
   } else {
     testRunning = false;
     chrome.storage.local.set({
-      autoTestConfig: { running: false, selector, interval: parseInt($('testInterval').value) || 30 },
+      autoTestConfig: { ...existing, running: false, selector, interval: parseInt($('testInterval').value) || 30 },
     });
     $('startTestBtn').textContent = 'Start';
     $('startTestBtn').className = 'btn-test';
@@ -175,7 +185,12 @@ function updateAutoTestUI(liveStats) {
     $('startTestBtn').textContent = 'Stop';
     $('startTestBtn').className = 'btn-test running';
     $('testStatus').textContent = `Cycle #${at.cycles}`;
+  } else {
+    testRunning = false;
+    $('startTestBtn').textContent = 'Start';
+    $('startTestBtn').className = 'btn-test';
   }
+  if (at.status) $('testStatus').textContent = at.status;
   if (at.hasAudio) {
     $('audioStatus').textContent = `Audio loaded (${at.audioDuration.toFixed(1)}s)`;
   }

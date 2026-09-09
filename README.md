@@ -6,6 +6,15 @@ Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browse
 
 ## Features
 
+### GuideX Runtime v4 branch
+
+`codex/guidex-v4-runtime` adds the `guidex-runtime-v4` probe for
+`/#/interaction-app/:runId`. Select Auto / Runtime v4 / Legacy in the popup.
+Reload both extension and page after switching versions. See
+[setup, field mapping and verification](docs/guidex-runtime-v4.md).
+The legacy metrics below still apply to older pages. Run `npm run check`
+to validate this branch (Node.js 18+, no dependency install needed).
+
 ### WebRTC Quality Monitoring
 - Hook `RTCPeerConnection.getStats()` to collect inbound-rtp, outbound-rtp, candidate-pair statistics
 - 500ms sub-sampling with 2s max-aggregated push to ProbeX backend

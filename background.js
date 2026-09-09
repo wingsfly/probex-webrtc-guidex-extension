@@ -77,7 +77,7 @@ chrome.runtime.onInstalled.addListener((details) => {
         // Inject into MAIN world (bypasses page CSP)
         chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          files: ['injected.js'],
+          files: ['guidex-runtime.js', 'injected.js'],
           world: 'MAIN',
         }).catch(() => {});
         // Inject config bridge into ISOLATED world

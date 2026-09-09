@@ -49,6 +49,15 @@
     <!-- Config -->
     <section class="config">
       <div class="field">
+        <label for="guidexProfile">GuideX Protocol</label>
+        <select id="guidexProfile">
+          <option value="auto">Auto (legacy / Runtime v4)</option>
+          <option value="runtime-v4">Runtime v4 (chat protocol 1.0)</option>
+          <option value="legacy">Legacy (voiceDictation)</option>
+        </select>
+        <p id="runtimeStatus" role="status">Reload GuideX after updating the extension.</p>
+      </div>
+      <div class="field">
         <label for="hubUrl">Hub URL</label>
         <input type="text" id="hubUrl" placeholder="http://localhost:8080">
       </div>

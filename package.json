@@ -1,0 +1,9 @@
+{
+  "name": "probex-webrtc-guidex-extension",
+  "version": "1.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "check": "node --check guidex-runtime.js && node --check injected.js && node --check popup.js && node --check content-script.js && node --check background.js && npm test"
+  }
+}

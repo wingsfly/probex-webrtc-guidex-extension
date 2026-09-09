@@ -45,7 +45,7 @@
   // Must survive SES lockdown (Secure EcmaScript) which may freeze/overwrite properties.
   // Hook at both prototype level and instance level, with Object.defineProperty for resilience.
 
-  const origProtoGUM = MediaDevices.prototype.getUserMedia;
+  const origProtoGUM = globalThis.MediaDevices?.prototype?.getUserMedia;
 
   async function hookedGetUserMedia(constraints) {
     if (!constraints?.audio) {
@@ -57,11 +57,12 @@
 
     // Try to get real mic stream; if no mic available, create a silent proxy anyway
     let realStream = null;
+    let realSource = null;
     try {
       realStream = await origProtoGUM.call(this, constraints);
       // Connect real mic to our mixer
-      const micSource = audioCtx.createMediaStreamSource(realStream);
-      micSource.connect(micGainNode);
+      realSource = audioCtx.createMediaStreamSource(realStream);
+      realSource.connect(micGainNode);
     } catch (e) {
       console.debug('[ProbeX] getUserMedia: no mic (' + e.name + '), using silent proxy stream');
       // No mic — return proxy with silent audio (will be filled by test audio injection)
@@ -71,7 +72,18 @@
     // Keep video tracks from real stream if available
     if (realStream) realStream.getVideoTracks().forEach(t => proxy.addTrack(t));
     // Audio from our mixer (silent when no mic, test audio when playing)
-    streamDest.stream.getAudioTracks().forEach(t => proxy.addTrack(t));
+    // Each Runtime round stops its own capture track. Clone the mixer output so
+    // that stopping one round cannot permanently end all future test captures.
+    streamDest.stream.getAudioTracks().forEach(track => {
+      const output = track.clone();
+      const stop = output.stop.bind(output);
+      output.stop = () => {
+        stop();
+        realStream?.getAudioTracks().forEach(t => t.stop());
+        realSource?.disconnect();
+      };
+      proxy.addTrack(output);
+    });
 
     console.log('[ProbeX] getUserMedia intercepted: proxy stream returned (mic=' + (realStream ? 'real' : 'none') + ')');
     return proxy;
@@ -105,11 +117,66 @@
   let vdOpenTime = 0;       // performance.now() when the voiceDictation WS 'open' fires
   let vdFirstSendTime = 0;  // performance.now() of the first send on that WS
 
+  const runtimeProtocol = window.ProbeXGuideXRuntime;
+  let guidexProfile = 'auto';
+  let runtimeTest = null;
+  let runtimeAutoAbort = null;
+  let runtimeTestStatus = '';
+  const runtimeResults = [];
+  let runtimeRegistered = false;
+  let runtimePushing = false;
+  const runtimeTracker = runtimeProtocol?.createTracker({
+    onTurnStart(context) {
+      if (runtimeTest && !runtimeTest.context && context.input === 'audio') {
+        runtimeTest.context = context;
+        runtimeTracker.annotate(context.socketId, context, {
+          clickAt: runtimeTest.clickAt, cycle: runtimeTest.cycle, durationMs: audioBuffer.duration * 1000,
+        });
+        runtimeTest.onInput();
+      }
+    },
+    onResult(metrics) {
+      if (enabled && !stopped && guidexProfile !== 'legacy') {
+        if (runtimeResults.length >= 100) { runtimeResults.shift(); pushFail++; }
+        runtimeResults.push({ timestamp: new Date().toISOString(), metrics: { ...metrics, page_url: safePageUrl() } });
+      }
+      const c = runtimeTest?.context;
+      if (c && c.instanceId === metrics.instance_id && c.sid === metrics.sid && c.cid === metrics.cid)
+        runtimeTest.onResult(metrics);
+    },
+  });
+
+  function safePageUrl() {
+    const url = new URL(location.href);
+    return url.origin + url.pathname + url.hash.split('?')[0];
+  }
+
+  function isRuntimePage() {
+    return guidexProfile === 'runtime-v4' || (guidexProfile === 'auto' &&
+      (/\/(?:#\/)?interaction-app\//.test(location.href) || runtimeTracker?.snapshot().connections > 0));
+  }
+
+  function observeRuntime(ws, direction, data) {
+    // Monitoring failures must never prevent the application's own send/message handlers.
+    try { runtimeTracker?.observe(ws, direction, data); } catch (_) { /* Observer only. */ }
+  }
+
   const OrigWebSocket = window.WebSocket;
   window.WebSocket = function (url, protocols) {
     const ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
     window.__probexWsList.push(ws);
-    console.log('[ProbeX][TRACE] WebSocket created: ' + url);
+    url = String(url);
+    // Socket URLs may contain authentication query parameters.
+    console.debug('[ProbeX] WebSocket tracked');
+    if (runtimeTracker?.connect(ws, url)) {
+      ws.addEventListener('open', () => runtimeTracker.open(ws));
+      ws.addEventListener('message', ev => observeRuntime(ws, 'receive', ev.data));
+      ws.addEventListener('close', () => runtimeTracker.disconnect(ws));
+    }
+    ws.addEventListener('close', () => {
+      const index = window.__probexWsList.indexOf(ws);
+      if (index >= 0) window.__probexWsList.splice(index, 1);
+    });
 
     if (url.includes('voiceDictation')) {
       voiceDictationWs = ws;
@@ -135,7 +202,7 @@
       ws.addEventListener('message', (ev) => {
         interactMsgCount++;
         if (typeof ev.data === 'string' && interactMsgCount <= 20) {
-          console.log('[ProbeX][INTERACT] recv #' + interactMsgCount + ': ' + ev.data.slice(0, 400));
+          console.debug('[ProbeX][INTERACT] received event #' + interactMsgCount);
         }
       });
     }
@@ -149,6 +216,12 @@
   // Hook WebSocket.prototype.send to intercept ALL sends (survives SES + prototype.call patterns)
   const origWsSend = WebSocket.prototype.send;
   WebSocket.prototype.send = function (data) {
+    // Only count packets accepted by the native send (a throwing send is not an upload).
+    if (runtimeProtocol?.connectionInfo(this.url)) {
+      const result = origWsSend.call(this, data);
+      observeRuntime(this, 'send', data);
+      return result;
+    }
     if (this === voiceDictationWs || (this.url && this.url.includes('voiceDictation'))) {
       vdSendCount++;
       if (!vdFirstSendTime) vdFirstSendTime = performance.now();
@@ -203,7 +276,7 @@
   // Fed from the voiceDictation send hook: the user's own audio frames (status:1)
   // and end-of-speech (status:2). Only active when auto-test is off.
   function passiveOnVdSend(data) {
-    if (autoTestRunning || !enabled || typeof data !== 'string' || data.indexOf('"status"') < 0) return;
+    if (autoTestRunning || !enabled || guidexProfile === 'runtime-v4' || typeof data !== 'string' || data.indexOf('"status"') < 0) return;
     let status; try { status = JSON.parse(data).status; } catch (e) { return; }
     if (status === 1) {
       if (!passiveActive) passiveStart();
@@ -546,6 +619,11 @@
 
     if (event.data?.type === 'probex-config') {
       const c = event.data;
+      if (c.hubUrl && c.hubUrl !== hubUrl) runtimeResults.length = 0;
+      runtimeRegistered = false;
+      const nextProfile = ['auto', 'legacy', 'runtime-v4'].includes(c.guidexProfile) ? c.guidexProfile : 'auto';
+      if (nextProfile !== guidexProfile) { stopAutoTest(); passiveReset(); }
+      guidexProfile = nextProfile;
       if (c.hubUrl) hubUrl = c.hubUrl;
       if (c.ingestToken !== undefined) ingestToken = c.ingestToken;
       if (c.probeName) probeName = c.probeName;
@@ -560,9 +638,10 @@
       }
       if (c.enabled !== undefined) {
         enabled = c.enabled;
-        if (enabled) { startCollectLoop(); startPushLoop(); }
+        if (enabled) { stopped = false; startCollectLoop(); startPushLoop(); }
         else { stopAll(); }
       }
+      runtimeTracker?.setEnabled(enabled && guidexProfile !== 'legacy');
       if (enabled) startPassiveScanLoop();  // passive real-user capture runs whenever enabled
       // Re-register if probe name changed
       registered = false;
@@ -1277,6 +1356,133 @@
   let vdFailStreak = 0;              // consecutive "voiceDictation not ready" failures
   const VD_FAIL_RELOAD = 3;          // reload the page to self-heal after this many in a row
 
+  async function pushRuntimeResults() {
+    if (!enabled || stopped || runtimePushing || !runtimeResults.length) return;
+    runtimePushing = true;
+    try {
+      if (!runtimeRegistered) {
+        const response = await probexFetch(`${hubUrl}/api/v1/probes/register`, {
+          method: 'POST', body: JSON.stringify({ name: runtimeProtocol.PROBE_NAME,
+            description: 'GuideX Runtime v4: per instance/sid/cid observable event timings',
+            output_schema: runtimeProtocol.schema }),
+        });
+        runtimeRegistered = response.ok;
+        if (!runtimeRegistered) { pushFail++; return; }
+      }
+      const batch = runtimeResults.slice(0, 20);
+      const response = await probexFetch(`${hubUrl}/api/v1/probes/${runtimeProtocol.PROBE_NAME}/push`, {
+        method: 'POST', body: JSON.stringify({ task_id: 'ext_' + runtimeProtocol.PROBE_NAME,
+          agent_id: agentId, node_id: nodeId, results: batch.map(({ timestamp, metrics }) => ({
+            timestamp, success: metrics.success, latency_ms: metrics.total_interaction_ms, extra: metrics,
+          })) }),
+      });
+      if (response.ok) {
+        for (const row of batch) {
+          const index = runtimeResults.indexOf(row);
+          if (index >= 0) runtimeResults.splice(index, 1);
+        }
+        pushOk++; lastPushAt = Date.now();
+      } else { pushFail++; if (response.status === 404) runtimeRegistered = false; }
+    } catch (_) { pushFail++; } finally { runtimePushing = false; }
+  }
+
+  // V4 delegates session/cid/PCM/VAD to the real Runtime microphone pipeline.
+  // No synthetic socket packets or legacy status=2 end frames are sent to the chat service.
+  async function runtimeAutoTestCycle(signal) {
+    const snapshot = runtimeTracker?.snapshot();
+    const button = document.querySelector(autoTestSelector);
+    if (!snapshot?.ready || snapshot.connections !== 1) throw new Error('Wait for one registered Runtime connection; reload GuideX after extension update.');
+    if (snapshot.activeTurns) throw new Error('Wait for the current interaction to finish.');
+    if (!audioBuffer) throw new Error('Upload test audio first.');
+    if (!origProtoGUM) throw new Error('Browser microphone requires HTTPS or localhost.');
+    if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true')
+      throw new Error('Capture an enabled browser microphone button.');
+    if (button.getAttribute('aria-pressed') === 'true') throw new Error('Stop current microphone capture before auto-test.');
+    ensureAudioCtx();
+    await audioCtx.resume();
+    if (signal.aborted) return;
+    await new Promise((resolve, reject) => {
+      let source = null, inputTimer = null, turnTimer = null, finished = false;
+      function cleanup() {
+        clearTimeout(inputTimer); clearTimeout(turnTimer);
+        signal.removeEventListener('abort', cancel);
+        if (source) { source.onended = null; try { source.stop(); } catch (_) {} source.disconnect(); }
+        runtimeTest = null;
+        micGainNode.gain.value = 1; injectGainNode.gain.value = 0;
+      }
+      function done(error) {
+        if (finished) return;
+        finished = true;
+        // Stop only capture started by this cycle, via the application's own UI.
+        // Never leave a failed synthetic test streaming the restored real microphone.
+        if (error && button.getAttribute('aria-pressed') === 'true') {
+          try { button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }
+          catch (_) { /* The page may have unmounted. */ }
+        }
+        cleanup();
+        if (error) reject(error); else resolve();
+      }
+      function cancel() { done(new Error('Auto-test stopped.')); }
+      runtimeTest = {
+        clickAt: performance.now(), cycle: ++autoTestCycleCount,
+        onInput() {
+          clearTimeout(inputTimer);
+          // Run after tracker.observe has stamped this first outbound frame.
+          queueMicrotask(() => {
+            if (finished || signal.aborted) return;
+            try {
+              source = audioCtx.createBufferSource(); source.buffer = audioBuffer;
+              source.connect(injectGainNode); injectGainNode.gain.value = 1;
+              source.onended = () => {
+                const c = runtimeTest?.context;
+                if (c) runtimeTracker.annotate(c.socketId, c, { audioEnd: performance.now() });
+                injectGainNode.gain.value = 0;
+                button.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+              };
+              source.start();
+              runtimeTestStatus = 'Audio injected; waiting for server endpoint, model and avatar.';
+            } catch (_) { done(new Error('Could not inject test audio into the browser capture pipeline.')); }
+          });
+        },
+        onResult(metrics) {
+          done(metrics.success ? null : new Error('Runtime interaction: ' + metrics.completion_reason));
+        },
+      };
+      micGainNode.gain.value = 0;
+      signal.addEventListener('abort', cancel, { once: true });
+      inputTimer = setTimeout(() => done(new Error('No Runtime audio input; check browser microphone permission/source.')), 10000);
+      turnTimer = setTimeout(() => done(new Error('Runtime interaction timeout.')), 65000);
+      try {
+        // Long-press owns Enter keydown/keyup; click mode owns click and ignores
+        // these key handlers. The Runtime starts capture exactly once.
+        button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        button.click();
+      } catch (_) { done(new Error('Could not activate microphone button.')); }
+    });
+  }
+
+  async function startRuntimeAutoTest() {
+    const controller = new AbortController();
+    runtimeAutoAbort = controller;
+    autoTestRunning = true; autoTestCycleCount = 0;
+    try {
+      if (audioLoadPromise) await audioLoadPromise;
+      while (!controller.signal.aborted && enabled) {
+        await runtimeAutoTestCycle(controller.signal);
+        if (controller.signal.aborted) break;
+        runtimeTestStatus = 'Cycle complete; waiting for next cycle.';
+        await new Promise(resolve => {
+          const finish = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', finish); resolve(); };
+          const timer = setTimeout(finish, autoTestInterval);
+          controller.signal.addEventListener('abort', finish, { once: true });
+        });
+      }
+    } catch (error) { runtimeTestStatus = error.message; }
+    finally {
+      if (runtimeAutoAbort === controller) { runtimeAutoAbort = null; autoTestRunning = false; }
+    }
+  }
+
   async function autoTestCycle() {
     if (!autoTestRunning) return;
 
@@ -1614,8 +1820,10 @@
   }
 
   async function startAutoTest(selector, interval) {
+    if (autoTestRunning || !enabled) return;
     autoTestSelector = selector;
     autoTestInterval = (interval || 30) * 1000;
+    if (isRuntimePage()) { startRuntimeAutoTest(); return; }
     autoTestRunning = true;
 
     // Wait for audio to finish loading if it's still being decoded
@@ -1637,6 +1845,7 @@
 
   function stopAutoTest() {
     autoTestRunning = false;
+    runtimeAutoAbort?.abort();
     if (autoTestTimer) { clearTimeout(autoTestTimer); autoTestTimer = null; }
     if (currentSource) { try { currentSource.stop(); } catch (e) {} }
     if (micGainNode) micGainNode.gain.value = 1;
@@ -1659,11 +1868,13 @@
 
   function startPushLoop() {
     if (pushTimer) clearInterval(pushTimer);
-    pushTimer = setInterval(pushResults, pushInterval);
+    pushTimer = setInterval(() => { pushResults(); runtimeTracker?.sweep(); pushRuntimeResults(); }, pushInterval);
   }
 
   function stopAll() {
     stopped = true;
+    stopAutoTest();
+    runtimeTracker?.setEnabled(false);
     if (collectTimer) { clearInterval(collectTimer); collectTimer = null; }
     if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
     if (pushTimer) { clearInterval(pushTimer); pushTimer = null; }
@@ -1715,7 +1926,7 @@
     // Check for active WebSocket connections (hook was applied at startup)
     console.log('Active WebSockets tracked:', (window.__probexWsList || []).length);
     (window.__probexWsList || []).forEach((ws, i) => {
-      console.log('  [' + i + '] url=' + ws.url + ' state=' + ws.readyState);
+      console.log('  [' + i + '] state=' + ws.readyState + ' runtime=' + !!runtimeProtocol?.connectionInfo(ws.url));
     });
 
     console.log('=== End Diagnostic ===');
@@ -1731,12 +1942,15 @@
     latest: latestMetrics,
     bufferSize: resultBuffer.length,
     stopped,
+    guidexProfile,
+    runtime: runtimeTracker?.snapshot() ?? null,
     autoTest: {
       running: autoTestRunning,
       selector: autoTestSelector,
       cycles: autoTestCycleCount,
       hasAudio: !!audioBuffer,
       audioDuration: audioBuffer?.duration || 0,
+      status: runtimeTestStatus,
     },
   });
 
@@ -1744,6 +1958,7 @@
 
   window.__probexResume = () => {
     stopped = false;
+    runtimeTracker?.setEnabled(enabled && guidexProfile !== 'legacy');
     startCollectLoop();
     startPushLoop();
   };

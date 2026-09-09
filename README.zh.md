@@ -6,6 +6,18 @@
 
 ## 功能
 
+### GuideX Runtime v4 适配分支
+
+当前分支 `codex/guidex-v4-runtime` 适配新版 `/#/interaction-app/:runId`。
+在插件弹窗选择 **Auto / Runtime v4 / Legacy**；切换分支后重新加载插件和 GuideX 页面。
+新版数据上报到独立探针 **guidex-runtime-v4**，按 `instanceId/sid/cid` 区分轮次。
+下文旧版 `guidex-interaction` 的指标口径继续适用于旧页面。
+
+新版按照 `header.event` 分别观测收音、STT、NLU、数字人播报，不把 `event.cid_end`
+当成收音或播放结束。H5 收不到新版 TTS 合成事件，因此不会猜测 TTS 延迟或逐轮唇形同步。
+完整字段映射和使用方式见 [Runtime v4 文档](docs/guidex-runtime-v4.md)。
+本地验证运行 `npm run check`，无需安装依赖。
+
 ### WebRTC 质量监测
 - Hook `RTCPeerConnection.getStats()`，采集 inbound-rtp、outbound-rtp、candidate-pair 统计
 - 500ms 子采样，2s 聚合后推送到 ProbeX 后端

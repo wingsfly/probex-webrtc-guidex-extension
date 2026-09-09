@@ -256,3 +256,6 @@ button#saveBtn:active {
 }
 
 .btn-test.running:hover { background: #ef4444; }
+
+#guidexProfile { width: 100%; padding: 6px; }
+#runtimeStatus { font-size: 11px; line-height: 1.4; color: #888; margin: 6px 0; }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "ProbeX WebRTC Monitor",
-  "version": "1.0.0",
+  "name": "ProbeX WebRTC Monitor (GuideX v4)",
+  "version": "1.1.0",
   "description": "Monitor WebRTC audio/video quality metrics and report to ProbeX as a remote probe",
   "permissions": [
     "storage",
@@ -17,7 +17,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["injected.js"],
+      "js": ["guidex-runtime.js", "injected.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
