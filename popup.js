@@ -54,6 +54,12 @@ async function queryActiveTab() {
 
 function updateStatus(config, liveStats) {
   const badge = $('statusBadge');
+  if (config.enabled && liveStats && liveStats.transportVersion !== 2) {
+    badge.textContent = 'Reload page';
+    badge.className = 'status-badge disconnected';
+    $('runtimeStatus').textContent = 'This page is running an old reporting script. Reload the GuideX page after updating the extension to prevent duplicate reports.';
+    return;
+  }
   const runtime = liveStats?.runtime;
   $('runtimeStatus').textContent = config.guidexProfile === 'legacy'
     ? 'Legacy probe: guidex-interaction'

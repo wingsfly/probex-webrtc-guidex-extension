@@ -4,6 +4,13 @@
 
 用于在浏览器页面上监测 WebRTC 音视频质量的 Chrome MV3 扩展，并针对讯飞 Guidex 数字人交互测试做了专门支持。
 
+### 1.1.1 上报去重修复
+
+请先更新 ProbeX 后端，再重新加载插件和 GuideX 页面。新版采用单实例转发和
+v2 消息，避免插件代理与页面回退重复发送；三类探针均保留稳定的 `result_id`
+供后端在重试时去重。旧页面仍运行旧脚本时，弹窗会提示 `Reload page`。
+旧后端不能保证响应丢失后的重试去重。详见[上报去重与升级说明](docs/reporting-delivery.md)。
+
 ## 功能
 
 ### GuideX Runtime v4 适配分支
@@ -17,6 +24,30 @@
 当成收音或播放结束。H5 收不到新版 TTS 合成事件，因此不会猜测 TTS 延迟或逐轮唇形同步。
 完整字段映射和使用方式见 [Runtime v4 文档](docs/guidex-runtime-v4.md)。
 本地验证运行 `npm run check`，无需安装依赖。
+
+1.1.5 的新版时间线使用 14 个英文节点；不再上报恒为零的 `start`，
+申请、音轨返回、UI 就绪合并为 `Mic_Ready`，未观察到就绪时不推算。
+`Last_STT` 直接配套当前有效的 `STT Text` 文本；上传窗口、音频量、
+STT 状态、模型状态及可由时间线推导的冗余时长字段不再注册或上报。
+配套 ProbeX 页面按趋势图、明细表/分页、单轮时间线排列。
+当前新版字段短名与注册说明均不带编号，`1st` 仍表示首次；跨阶段间隔短名以 `_To_`
+连接起止点，例如 `LastAudio_To_STT`、`STT_To_Answer`。
+回答和播报时长分别使用 `Answer_Dur`、`Play_Dur`，保留原数据键
+`answer_stream`、`avatar_speak_duration` 及计算公式。
+移除 `Audio_To_Speech`（`audio_start_to_speech_started`）的注册、上报和展示，
+但保留 `Speech_Started` 时间点。
+业务顺序单独维护；`LastAudio_To_STT`、`LastAudio_To_Answer`、`LastAudio_To_Play`
+统一从本轮最后一次成功音频上传起算，分别到最终识别、首次回答和首次播报通知。
+它们以新数据键 `last_audio_to_*` 替换旧 `Stop_To_*`，不只是改名。
+自动测试也使用 `LastAudio_To_Play`，移除独立的 `Test_To_Play`。
+缺失锚点保持空值，保留零值和负值，不给旧记录换名或反推新指标。
+源代码更新不等于线上部署；必须重新加载插件和 GuideX 页面后再采样。
+
+确认 `presence_left` 正常离场后，会话收尾记录为 `Done`，保留
+`End_By=session_ended`、已观测节点及明细/原始导出，不纳入趋势图、
+单轮图及其均值。`Audio_To_End/latency_ms` 留空，不补造识别、回答或
+播放终态。错误、超时、断连和未知结束原因仍失败；既有失败记录不凭
+`session_ended` 自动改判。本次需同步发布 ProbeX 后端和前端，再重载客户端。
 
 ### WebRTC 质量监测
 - Hook `RTCPeerConnection.getStats()`，采集 inbound-rtp、outbound-rtp、candidate-pair 统计
@@ -153,7 +184,8 @@
 ```
 
 - **injected.js**：运行在页面 MAIN world。Hook `RTCPeerConnection`、`WebSocket`、`getUserMedia`，包含全部测量逻辑。通过周期性重新注入，绕过 SES（Secure EcmaScript）锁定。
-- **content-script.js**：连接 chrome.storage 配置与 injected.js 的桥接层。为混合内容（HTTPS 页面 → HTTP ProbeX）把 fetch 请求经 background SW 代理转发。
+- **transport.js**：在发送前选择唯一转发通道，隔离旧消息和失效实例，已发送的请求不跨通道重发。
+- **content-script.js**：连接 chrome.storage 配置与 injected.js 的单实例桥接层。为混合内容（HTTPS 页面 → HTTP ProbeX）把 fetch 请求经 background SW 代理转发。
 - **background.js**：轻量 Service Worker，负责 popup 查询、fetch 代理、以及更新时重新注入。
 - **popup.html/js/css**：配置 UI，含自动拨测面板（捕获按钮、上传音频、区间配置、启停）。
 

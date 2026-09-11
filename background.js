@@ -18,10 +18,17 @@ let stats = { pushSuccess: 0, pushFail: 0, lastPushAt: null, activeConnections: 
 // --- Message handling (popup + content-script stats reports) ---
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'probex-bridge-ping-v2') {
+    sendResponse({ ok: true });
+    return;
+  }
   // Fetch proxy: content-script asks us to make HTTP requests
   // (bypasses mixed content since SW is not bound by page protocol)
   if (msg.type === 'proxy-fetch') {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
     fetch(msg.url, {
+      signal: controller.signal,
       method: msg.method || 'GET',
       headers: msg.headers || { 'Content-Type': 'application/json' },
       body: msg.body || null,
@@ -31,7 +38,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       })
       .catch((e) => {
         sendResponse({ ok: false, status: 0, error: e.message });
-      });
+      }).finally(() => clearTimeout(timeout));
     return true; // async sendResponse
   }
 
@@ -77,7 +84,7 @@ chrome.runtime.onInstalled.addListener((details) => {
         // Inject into MAIN world (bypasses page CSP)
         chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          files: ['guidex-runtime.js', 'injected.js'],
+          files: ['transport.js', 'guidex-runtime.js', 'guidex-input.js', 'injected.js'],
           world: 'MAIN',
         }).catch(() => {});
         // Inject config bridge into ISOLATED world

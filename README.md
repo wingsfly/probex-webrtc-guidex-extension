@@ -4,6 +4,16 @@
 
 Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browser pages, with specialized support for iFlytek Guidex digital human interaction testing.
 
+### Reporting Reliability (1.1.1)
+
+Update the ProbeX backend first, then reload the extension **and the GuideX page**.
+The popup shows `Reload page` if an old page script is still running.
+Versioned single-bridge dispatch prevents proxy/page double sends. WebRTC, Legacy
+and Runtime results carry a stable `result_id` across retries; the updated backend
+deduplicates by that ID without merging distinct samples. Old hubs accept the
+field but cannot guarantee deduplication after an uncertain network outcome.
+See [delivery, retry and upgrade details](docs/reporting-delivery.md).
+
 ## Features
 
 ### GuideX Runtime v4 branch
@@ -12,8 +22,37 @@ Chrome MV3 extension for monitoring WebRTC audio/video quality metrics on browse
 `/#/interaction-app/:runId`. Select Auto / Runtime v4 / Legacy in the popup.
 Reload both extension and page after switching versions. See
 [setup, field mapping and verification](docs/guidex-runtime-v4.md).
+Runtime v4 fields are **not finalized**. Obsolete v4 test history is cleared during
+schema iteration, not on startup or a schedule. Preserve history after explicit
+user sign-off; Legacy and WebRTC history are outside this cleanup scope.
 The legacy metrics below still apply to older pages. Run `npm run check`
 to validate this branch (Node.js 18+, no dependency install needed).
+
+Version 1.1.5 uses 14 English milestone labels. `Mic_Ready` replaces the separate
+acquisition/UI-ready fields; the implicit zero-valued `start` is not reported.
+`Last_STT` is paired with the current `STT Text` snapshot. Redundant upload,
+audio-size, STT-status, model-status, and derived duration fields are no longer
+registered for Runtime v4.
+The matching ProbeX UI places the turn timeline below the table and pagination.
+Confirmed normal `presence_left` session closures are `Done` with
+`End_By=session_ended`. They stay in details/raw exports, but not timing charts or
+their averages. Standard latency stays null; missing completion milestones are
+never synthesized. Errors, timeouts, disconnects and unknown ending reasons stay
+failures. Deploy the companion backend and frontend, then reload the extension
+and idle GuideX pages; updating source alone does not change existing records.
+Current Runtime v4 labels and schema descriptions have no numeric prefixes;
+`1st` still means first. Cross-stage intervals use endpoint names joined by `_To_`,
+such as `LastAudio_To_STT` and `STT_To_Answer`. Answer and playback durations use
+`Answer_Dur` and `Play_Dur`, keeping their `answer_stream` / `avatar_speak_duration`
+keys and formulas. `Audio_To_Speech` (`audio_start_to_speech_started`) is no longer
+registered, reported, or displayed; the `Speech_Started` milestone remains.
+`LastAudio_To_STT`, `LastAudio_To_Answer`, and `LastAudio_To_Play` measure from the
+last successful audio append in the same turn to final STT, first answer, and
+first business playback notification. They replace all `Stop_To_*` metrics using
+new `last_audio_to_*` data keys. Auto-tests also use `LastAudio_To_Play`; the
+separate `Test_To_Play` metric is removed. Missing anchors stay null; zero and
+negative deltas are preserved. No historical values are relabeled or inferred.
+Updating source does not deploy the UI or reload already-injected pages.
 
 ### WebRTC Quality Monitoring
 - Hook `RTCPeerConnection.getStats()` to collect inbound-rtp, outbound-rtp, candidate-pair statistics
@@ -154,7 +193,8 @@ toggleable in the legend).
 ```
 
 - **injected.js**: Runs in page MAIN world. Hooks `RTCPeerConnection`, `WebSocket`, `getUserMedia`. Contains all measurement logic. Survives SES (Secure EcmaScript) lockdown via periodic re-application.
-- **content-script.js**: Bridge between chrome.storage config and injected.js. Proxies fetch requests through background SW for mixed content (HTTPS page -> HTTP ProbeX).
+- **transport.js**: Selects one transport before dispatch, isolating old responses and invalidated bridges without cross-transport write retries.
+- **content-script.js**: Single-instance bridge between chrome.storage config and injected.js. Proxies fetch requests through background SW for mixed content (HTTPS page -> HTTP ProbeX).
 - **background.js**: Lightweight Service Worker for popup queries, fetch proxy, and re-injection on update.
 - **popup.html/js/css**: Configuration UI with auto-test panel (capture button, audio upload, interval config, start/stop).
 

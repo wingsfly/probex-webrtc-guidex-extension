@@ -22,6 +22,10 @@
   // we intercept the mic stream regardless of how the app transmits it.
 
   const origGetUserMedia = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+  let runtimeInputObserver = null;
+  function observeInput(method, ...args) {
+    try { return runtimeInputObserver?.[method](...args); } catch (_) { return null; }
+  }
   let audioCtx = null;
   let audioBuffer = null;       // decoded AudioBuffer for test audio
   let currentSource = null;     // active AudioBufferSourceNode
@@ -52,6 +56,20 @@
       return origProtoGUM.call(this, constraints);
     }
 
+    const capture = observeInput('captureRequested');
+    // Passive v4 observation must not add the auto-test mixer to the capture path.
+    if (runtimeProtocol && isRuntimePage() && !runtimeTest) {
+      try {
+        const stream = await origProtoGUM.call(this, constraints);
+        if (stream.getAudioTracks().some(track => track.readyState === 'live'))
+          observeInput('captureReady', capture);
+        else observeInput('captureFailed', capture);
+        return stream;
+      } catch (error) {
+        observeInput('captureFailed', capture);
+        throw error;
+      }
+    }
     ensureAudioCtx();
     if (audioCtx.state === 'suspended') await audioCtx.resume();
 
@@ -60,10 +78,15 @@
     let realSource = null;
     try {
       realStream = await origProtoGUM.call(this, constraints);
+      if (realStream.getAudioTracks().some(t => t.readyState === 'live'))
+        observeInput('captureReady', capture);
       // Connect real mic to our mixer
       realSource = audioCtx.createMediaStreamSource(realStream);
       realSource.connect(micGainNode);
     } catch (e) {
+      observeInput('captureFailed', capture);
+      // Passive Runtime monitoring must preserve permission/device failures.
+      if (runtimeProtocol && isRuntimePage() && !runtimeTest) throw e;
       console.debug('[ProbeX] getUserMedia: no mic (' + e.name + '), using silent proxy stream');
       // No mic — return proxy with silent audio (will be filled by test audio injection)
     }
@@ -127,6 +150,7 @@
   let runtimePushing = false;
   const runtimeTracker = runtimeProtocol?.createTracker({
     onTurnStart(context) {
+      observeInput('turnStarted', context);
       if (runtimeTest && !runtimeTest.context && context.input === 'audio') {
         runtimeTest.context = context;
         runtimeTracker.annotate(context.socketId, context, {
@@ -136,15 +160,37 @@
       }
     },
     onResult(metrics) {
+      observeInput('turnEnded', metrics);
       if (enabled && !stopped && guidexProfile !== 'legacy') {
         if (runtimeResults.length >= 100) { runtimeResults.shift(); pushFail++; }
-        runtimeResults.push({ timestamp: new Date().toISOString(), metrics: { ...metrics, page_url: safePageUrl() } });
+        runtimeResults.push({ result_id: window.ProbeXTransport.newId(), timestamp: new Date().toISOString(), metrics: { ...metrics, page_url: safePageUrl() } });
       }
       const c = runtimeTest?.context;
       if (c && c.instanceId === metrics.instance_id && c.sid === metrics.sid && c.cid === metrics.cid)
         runtimeTest.onResult(metrics);
     },
   });
+
+  runtimeInputObserver = window.ProbeXGuideXInput?.createObserver({
+    document,
+    enabled: () => enabled && !stopped && guidexProfile !== 'legacy' && !runtimeTest,
+    socket() {
+      const sockets = window.__probexWsList.filter(ws => runtimeProtocol?.connectionInfo(ws.url));
+      return sockets.length === 1 ? sockets[0] : null;
+    },
+    annotate: (context, info) => runtimeTracker?.annotateInput(context.socketId, context, info),
+  });
+  for (const type of ['pointerdown', 'pointercancel', 'lostpointercapture', 'keydown', 'click']) {
+    document.addEventListener?.(type, event => {
+      try { runtimeInputObserver?.handle(event); } catch (_) { /* Never interfere with input. */ }
+    }, true);
+  }
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(() => {
+      try { runtimeInputObserver?.refresh(); } catch (_) { /* DOM may be unmounting. */ }
+    }).observe(document, { subtree: true, childList: true, attributes: true,
+      attributeFilter: ['class', 'aria-pressed', 'aria-busy', 'disabled'] });
+  }
 
   function safePageUrl() {
     const url = new URL(location.href);
@@ -171,7 +217,10 @@
     if (runtimeTracker?.connect(ws, url)) {
       ws.addEventListener('open', () => runtimeTracker.open(ws));
       ws.addEventListener('message', ev => observeRuntime(ws, 'receive', ev.data));
-      ws.addEventListener('close', () => runtimeTracker.disconnect(ws));
+      ws.addEventListener('close', () => {
+        runtimeInputObserver?.clear(ws);
+        runtimeTracker.disconnect(ws);
+      });
     }
     ws.addEventListener('close', () => {
       const index = window.__probexWsList.indexOf(ws);
@@ -604,6 +653,10 @@
   const connections = new Map();
   let nextId = 1;
   let resultBuffer = [];
+  const interactionResults = [];
+  let interactionPushing = false;
+  let webrtcPushing = false;
+  let configGeneration = 0;
   let collectTimer = null;
   let pushTimer = null;
   let stopped = false;
@@ -619,7 +672,14 @@
 
     if (event.data?.type === 'probex-config') {
       const c = event.data;
-      if (c.hubUrl && c.hubUrl !== hubUrl) runtimeResults.length = 0;
+      if ((c.hubUrl && c.hubUrl !== hubUrl) || (c.agentId && c.agentId !== agentId) ||
+          (c.probeName && c.probeName !== probeName)) {
+        configGeneration++;
+        runtimeResults.length = 0;
+        interactionResults.length = 0;
+        resultBuffer.length = 0;
+        interactionProbeRegistered = false;
+      }
       runtimeRegistered = false;
       const nextProfile = ['auto', 'legacy', 'runtime-v4'].includes(c.guidexProfile) ? c.guidexProfile : 'auto';
       if (nextProfile !== guidexProfile) { stopAutoTest(); passiveReset(); }
@@ -757,6 +817,7 @@
       : null;
 
     resultBuffer.push({
+      result_id: window.ProbeXTransport.newId(),
       timestamp: new Date().toISOString(),
       pageUrl: location.href,
       connectionCount: connections.size,
@@ -767,64 +828,12 @@
     if (resultBuffer.length > 200) resultBuffer = resultBuffer.slice(-100);
   }
 
-  // ====== Network: proxy through extension (avoids mixed content) with direct fallback ======
-
-  // Request ID counter for proxy RPC
-  let rpcId = 0;
-  const rpcCallbacks = new Map();
-
-  // Listen for proxy responses from content-script
-  window.addEventListener('message', (event) => {
-    if (event.source !== window || event.data?.type !== 'probex-fetch-response') return;
-    const cb = rpcCallbacks.get(event.data.id);
-    if (cb) { rpcCallbacks.delete(event.data.id); cb(event.data); }
-  });
-
-  function proxyFetch(url, options) {
-    return new Promise((resolve) => {
-      const id = ++rpcId;
-      const timeout = setTimeout(() => {
-        rpcCallbacks.delete(id);
-        resolve(null); // null = proxy unavailable, caller should fallback
-      }, 3000);
-      rpcCallbacks.set(id, (data) => {
-        clearTimeout(timeout);
-        resolve(data); // { ok, status, body }
-      });
-      window.postMessage({
-        type: 'probex-fetch-request',
-        id,
-        url,
-        method: options.method || 'GET',
-        headers: options.headers || null,
-        body: options.body || null,
-      }, '*');
-    });
-  }
-
-  // Headers for hub calls; adds the ingest token when configured (authed hubs).
-  function hubHeaders() {
-    const h = { 'Content-Type': 'application/json' };
-    if (ingestToken) h['X-Ingest-Token'] = ingestToken;
-    return h;
-  }
-
-  // Unified fetch: try extension proxy first (no mixed content), fallback to direct
-  async function probexFetch(url, options) {
-    const opts = { ...options, headers: hubHeaders() };
-    // Try proxy through content-script → background (bypasses mixed content)
-    const proxyResult = await proxyFetch(url, opts);
-    // Only trust proxy if it got a real HTTP response (status > 0)
-    if (proxyResult && proxyResult.status > 0) {
-      return { ok: proxyResult.ok, status: proxyResult.status };
-    }
-    // Fallback: direct fetch (works for localhost, same-protocol, etc.)
-    const resp = await fetch(url, {
-      method: opts.method || 'GET',
-      headers: opts.headers,
-      body: opts.body || null,
-    });
-    return { ok: resp.ok, status: resp.status };
+  // ====== Network: one selected transport per attempt ======
+  const transport = window.ProbeXTransport.createClient({ window, fetch: (...args) => fetch(...args) });
+  function probexFetch(url, options) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (ingestToken) headers['X-Ingest-Token'] = ingestToken;
+    return transport(url, { ...options, headers });
   }
 
   // ====== Push to ProbeX ======
@@ -861,13 +870,20 @@
 
   let regFailCount = 0;
   async function pushResults() {
-    if (!enabled || resultBuffer.length === 0) return;
+    if (!enabled || stopped || webrtcPushing || resultBuffer.length === 0) return;
+    webrtcPushing = true;
+    try { await pushWebrtcBatch(configGeneration); }
+    finally { webrtcPushing = false; }
+  }
+
+  async function pushWebrtcBatch(generation) {
     if (!registered) {
       regFailCount++;
       // Exponential backoff: only retry registration every 2^n cycles (max 64 = ~5 min)
       const retryEvery = Math.min(64, Math.pow(2, Math.floor(Math.log2(regFailCount))));
       if (regFailCount % retryEvery !== 0) return;
       await registerProbe();
+      if (generation !== configGeneration) { registered = false; return; }
       if (!registered) {
         if (regFailCount <= 1) {
           console.debug('[ProbeX] ProbeX hub unreachable (' + hubUrl + '), will retry with backoff');
@@ -902,6 +918,7 @@
         console.log('[ProbeX] pushed %d results OK', probeResults.length);
       } else {
         pushFail++;
+        if (generation === configGeneration) resultBuffer.unshift(...batch.slice(-20));
         console.error('[ProbeX] push HTTP %d', result.status);
       }
       if (result.status === 404) registered = false;
@@ -909,7 +926,7 @@
     } catch (e) {
       pushFail++;
       console.error('[ProbeX] push error:', e.message);
-      resultBuffer.unshift(...batch.slice(-20));
+      if (generation === configGeneration) resultBuffer.unshift(...batch.slice(-20));
     }
   }
 
@@ -917,12 +934,12 @@
     const probeResults = [];
     const groups = new Map();
     for (const item of batch) {
-      const key = item.timestamp;
+      const key = item.result_id;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     }
-    for (const [ts, items] of groups) {
-      const result = { timestamp: ts, success: true, extra: {} };
+    for (const [resultID, items] of groups) {
+      const result = { result_id: resultID, timestamp: items[0].timestamp, success: true, extra: {} };
       let totalDown = 0, hasDown = false, totalUp = 0, hasUp = false;
       let totalDecoded = 0, hasDecoded = false, totalDropped = 0, hasDropped = false;
       let worstLoss = 0;
@@ -1315,35 +1332,40 @@
   }
 
   async function pushInteractionResult(metrics) {
-    if (!interactionProbeRegistered) {
-      await registerInteractionProbe();
-      if (!interactionProbeRegistered) return;
-    }
+    if (interactionResults.length >= 100) { interactionResults.shift(); pushFail++; }
+    interactionResults.push({ result_id: window.ProbeXTransport.newId(), timestamp: new Date().toISOString(),
+      success: metrics.success, latency_ms: metrics.total_interaction_ms ?? null, extra: metrics });
+    await pushInteractionResults();
+  }
+
+  async function pushInteractionResults() {
+    if (!enabled || stopped || interactionPushing || !interactionResults.length) return;
+    interactionPushing = true;
+    const generation = configGeneration;
     try {
-      await probexFetch(`${hubUrl}/api/v1/probes/${encodeURIComponent(INTERACTION_PROBE_NAME)}/push`, {
+      if (!interactionProbeRegistered) {
+        await registerInteractionProbe();
+        if (generation !== configGeneration) { interactionProbeRegistered = false; return; }
+        if (!interactionProbeRegistered) { pushFail++; return; }
+      }
+      const batch = interactionResults.slice(0, 20);
+      const response = await probexFetch(`${hubUrl}/api/v1/probes/${encodeURIComponent(INTERACTION_PROBE_NAME)}/push`, {
         method: 'POST',
         body: JSON.stringify({
           task_id: 'ext_' + INTERACTION_PROBE_NAME,
           agent_id: agentId,
           node_id: nodeId,
-          results: [{
-            timestamp: new Date().toISOString(),
-            success: metrics.success,
-            latency_ms: metrics.totalInteractionMs || null,
-            extra: metrics,
-          }],
+          results: batch,
         }),
       });
-      console.log('[ProbeX] Interaction probe: ' + (metrics.success ? 'OK' : 'FAIL') +
-        ' total=' + (metrics.total_interaction_ms || '-') + 'ms' +
-        ' firstASR=' + (metrics.audio_start_to_first_asr_ms || '-') + 'ms' +
-        ' speakToTts=' + (metrics.audio_end_to_tts_ms || '-') + 'ms' +
-        ' avatarSpeak=' + (metrics.avatar_speak_duration_ms || '-') + 'ms' +
-        ' lipMove=' + (metrics.lip_move_ms || '-') + 'ms' +
-        ' endToPlay=' + (metrics.audio_end_to_playback_ms || '-') + 'ms' +
-        ' playDur=' + (metrics.actual_audio_duration_ms || '-') + 'ms' +
-        ' lipToPlay=' + (metrics.vmr_to_actual_audio_ms != null ? metrics.vmr_to_actual_audio_ms : '-') + 'ms');
-    } catch (e) {}
+      if (response.ok) {
+        for (const row of batch) {
+          const index = interactionResults.indexOf(row);
+          if (index >= 0) interactionResults.splice(index, 1);
+        }
+        pushOk++; lastPushAt = Date.now();
+      } else { pushFail++; if (response.status === 400 || response.status === 404) interactionProbeRegistered = false; }
+    } catch (_) { pushFail++; } finally { interactionPushing = false; }
   }
 
   // ====== Auto-Test: Loop ======
@@ -1359,6 +1381,7 @@
   async function pushRuntimeResults() {
     if (!enabled || stopped || runtimePushing || !runtimeResults.length) return;
     runtimePushing = true;
+    const generation = configGeneration;
     try {
       if (!runtimeRegistered) {
         const response = await probexFetch(`${hubUrl}/api/v1/probes/register`, {
@@ -1366,14 +1389,15 @@
             description: 'GuideX Runtime v4: per instance/sid/cid observable event timings',
             output_schema: runtimeProtocol.schema }),
         });
+        if (generation !== configGeneration) { runtimeRegistered = false; return; }
         runtimeRegistered = response.ok;
         if (!runtimeRegistered) { pushFail++; return; }
       }
       const batch = runtimeResults.slice(0, 20);
       const response = await probexFetch(`${hubUrl}/api/v1/probes/${runtimeProtocol.PROBE_NAME}/push`, {
         method: 'POST', body: JSON.stringify({ task_id: 'ext_' + runtimeProtocol.PROBE_NAME,
-          agent_id: agentId, node_id: nodeId, results: batch.map(({ timestamp, metrics }) => ({
-            timestamp, success: metrics.success, latency_ms: metrics.total_interaction_ms, extra: metrics,
+          agent_id: agentId, node_id: nodeId, results: batch.map(({ result_id, timestamp, metrics }) => ({
+            result_id, timestamp, success: metrics.success, latency_ms: metrics.total_interaction, extra: metrics,
           })) }),
       });
       if (response.ok) {
@@ -1410,12 +1434,12 @@
         runtimeTest = null;
         micGainNode.gain.value = 1; injectGainNode.gain.value = 0;
       }
-      function done(error) {
+      function done(error, interrupted = false) {
         if (finished) return;
         finished = true;
         // Stop only capture started by this cycle, via the application's own UI.
         // Never leave a failed synthetic test streaming the restored real microphone.
-        if (error && button.getAttribute('aria-pressed') === 'true') {
+        if ((error || interrupted) && button.getAttribute('aria-pressed') === 'true') {
           try { button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }
           catch (_) { /* The page may have unmounted. */ }
         }
@@ -1434,8 +1458,6 @@
               source = audioCtx.createBufferSource(); source.buffer = audioBuffer;
               source.connect(injectGainNode); injectGainNode.gain.value = 1;
               source.onended = () => {
-                const c = runtimeTest?.context;
-                if (c) runtimeTracker.annotate(c.socketId, c, { audioEnd: performance.now() });
                 injectGainNode.gain.value = 0;
                 button.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
               };
@@ -1445,7 +1467,8 @@
           });
         },
         onResult(metrics) {
-          done(metrics.success ? null : new Error('Runtime interaction: ' + metrics.completion_reason));
+          done(metrics.success ? null : new Error('Runtime interaction: ' + metrics.completion_reason),
+            metrics.completion_reason === 'interrupted');
         },
       };
       micGainNode.gain.value = 0;
@@ -1868,7 +1891,7 @@
 
   function startPushLoop() {
     if (pushTimer) clearInterval(pushTimer);
-    pushTimer = setInterval(() => { pushResults(); runtimeTracker?.sweep(); pushRuntimeResults(); }, pushInterval);
+    pushTimer = setInterval(() => { pushResults(); pushInteractionResults(); runtimeTracker?.sweep(); pushRuntimeResults(); }, pushInterval);
   }
 
   function stopAll() {
@@ -1935,6 +1958,7 @@
   // ====== API for popup (called via chrome.scripting.executeScript with world: MAIN) ======
 
   window.__probexStats = () => ({
+    transportVersion: 2,
     connections: connections.size,
     pushOk,
     pushFail,
